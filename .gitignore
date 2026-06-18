@@ -1,0 +1,24 @@
+# Node.js
+converter/node_modules/
+converter/package-lock.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Output
+output/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 参考项目 (不需要分享)
+参考项目/
