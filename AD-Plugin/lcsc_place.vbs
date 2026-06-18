@@ -249,9 +249,52 @@ Function GetTempDir()
     GetTempDir = fso.GetSpecialFolder(2) & "\LCSC-AD-Transfer\"
 End Function
 
+'=============================================================================
+' Link placed component's footprint to PcbLib file (Bocangku pattern)
+'=============================================================================
+Sub LinkFootprintToPcbLib(schRef, pcbLibPath, footprintName)
+    Dim currentSheet, Iterator, Component, ImplIterator, schImpl
+
+    If pcbLibPath = "" Then Exit Sub
+    If SchServer Is Nothing Then Exit Sub
+
+    On Error Resume Next
+    Set currentSheet = SchServer.GetCurrentSchDocument
+    If currentSheet Is Nothing Then Exit Sub
+
+    ' Find the placed component by LibReference
+    Set Iterator = currentSheet.SchIterator_Create
+    Iterator.AddFilter_ObjectSet MkSet(eSchComponent)
+    Set Component = Iterator.FirstSchObject
+    Do While Not Component Is Nothing
+        If LCase(Component.LibReference) = LCase(schRef) Then
+            ' Found it — update footprint implementation
+            Set ImplIterator = Component.SchIterator_Create
+            ImplIterator.AddFilter_ObjectSet MkSet(eImplementation)
+            Set schImpl = ImplIterator.FirstSchObject
+            Do While Not schImpl Is Nothing
+                If schImpl.ModelType = "PCBLIB" Then
+                    schImpl.ModelName = footprintName
+                    If schImpl.DatafileLinkCount > 0 Then
+                        schImpl.DatafileLink(0).Location = pcbLibPath
+                    End If
+                End If
+                Set schImpl = ImplIterator.NextSchObject
+            Loop
+            Component.SchIterator_Destroy ImplIterator
+            Exit Do
+        End If
+        Set Component = Iterator.NextSchObject
+    Loop
+    currentSheet.SchIterator_Destroy Iterator
+    currentSheet.GraphicallyInvalidate
+    On Error GoTo 0
+End Sub
+
 Function DownloadAndOpen(lcscId)
     Dim response, parts, schPath, pcbPath, stepPath, title, pkg
-    Dim schDoc, pcbDoc, fso
+    Dim binSchLibPath, binPcbLibPath
+    Dim schDoc, pcbDoc, fso, schObj, currentSheet
 
     DownloadAndOpen = False
 
@@ -261,34 +304,76 @@ Function DownloadAndOpen(lcscId)
     parts = Split(response, "|")
     If UBound(parts) < 7 Then Exit Function
 
-    ' Format: success|schLib|pcbLib|schDoc|pcbDoc|stepPath|title|package|uuid
-    schPath  = parts(3)
-    pcbPath  = parts(4)
-    stepPath = parts(5)
-    title    = parts(6)
-    pkg      = parts(7)
+    ' Format: success|schLib|pcbLib|schDoc|pcbDoc|stepPath|title|package|uuid|binSchLib|binPcbLib
+    schPath      = parts(3)   ' SchDoc (ASCII)
+    pcbPath      = parts(4)   ' PcbDoc (ASCII)
+    stepPath     = parts(5)   ' 3D model
+    title        = parts(6)   ' Component name / LIBREFERENCE
+    pkg          = parts(7)   ' Package name
+    binSchLibPath = ""        ' Binary SchLib
+    binPcbLibPath = ""        ' Binary PcbLib
+    If UBound(parts) >= 9 Then binSchLibPath = parts(9)
+    If UBound(parts) >= 10 Then binPcbLibPath = parts(10)
 
     Set fso = CreateObject("Scripting.FileSystemObject")
 
-    If fso.FileExists(schPath) Then
+    ' ---- Try PlaceSchComponent with binary SchLib ----
+    Dim placedOk : placedOk = False
+    If binSchLibPath <> "" And fso.FileExists(binSchLibPath) Then
         On Error Resume Next
-        Set schDoc = Client.OpenDocument("SCH", schPath)
-        If Not schDoc Is Nothing Then Client.ShowDocument schDoc
+        Set currentSheet = SchServer.GetCurrentSchDocument
+        If Not currentSheet Is Nothing Then
+            currentSheet.PlaceSchComponent binSchLibPath, title, schObj
+            If Not schObj Is Nothing Then
+                ' Place left of origin to avoid overlapping existing components
+                schObj.MoveByXY MilsToCoord(-3000), MilsToCoord(0)
+                SchServer.GetCurrentSchDocument.GraphicallyInvalidate
+                placedOk = True
+            End If
+        End If
         On Error GoTo 0
     End If
 
-    If fso.FileExists(pcbPath) Then
-        On Error Resume Next
-        Set pcbDoc = Client.OpenDocument("PCB", pcbPath)
-        If Not pcbDoc Is Nothing Then Client.ShowDocument pcbDoc
-        On Error GoTo 0
+    ' ---- Post-placement: link footprint + open libraries ----
+    If placedOk Then
+        ' Find the placed component and link footprint to PcbLib file
+        LinkFootprintToPcbLib title, binPcbLibPath, pkg
+
+        ' Load SchLib + PcbLib into project (no view switch)
+        If binSchLibPath <> "" And fso.FileExists(binSchLibPath) Then
+            On Error Resume Next
+            Client.OpenDocument "SchLib", binSchLibPath
+            On Error GoTo 0
+        End If
+        If binPcbLibPath <> "" And fso.FileExists(binPcbLibPath) Then
+            On Error Resume Next
+            Client.OpenDocument "PcbLib", binPcbLibPath
+            On Error GoTo 0
+        End If
+    Else
+        ' ---- Fallback: open SchDoc + PcbDoc as AD tabs ----
+        If fso.FileExists(schPath) Then
+            On Error Resume Next
+            Set schDoc = Client.OpenDocument("SCH", schPath)
+            If Not schDoc Is Nothing Then Client.ShowDocument schDoc
+            On Error GoTo 0
+        End If
+        If fso.FileExists(pcbPath) Then
+            On Error Resume Next
+            Set pcbDoc = Client.OpenDocument("PCB", pcbPath)
+            If Not pcbDoc Is Nothing Then Client.ShowDocument pcbDoc
+            On Error GoTo 0
+        End If
     End If
 
     Dim has3D, statusMsg
     has3D = (stepPath <> "" And fso.FileExists(stepPath))
-    statusMsg = "[" & lcscId & "] " & title & " (" & pkg & ") -- SCH+PCB"
+    If placedOk Then
+        statusMsg = "[" & lcscId & "] " & title & " (" & pkg & ") -- Placed on schematic"
+    Else
+        statusMsg = "[" & lcscId & "] " & title & " (" & pkg & ") -- SCH+PCB opened"
+    End If
     If has3D Then statusMsg = statusMsg & "+3D"
-    statusMsg = statusMsg & " opened"
     ShowStatus statusMsg
 
     DownloadAndOpen = True

@@ -16,6 +16,9 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 
 // 加载立创 EDA 官方的 JSAPI 转换库
 const lcsc = require("./jsapi.min.js");
@@ -25,6 +28,29 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
+
+// Python 3.11 path for altium-monkey binary converter
+const PYTHON311 = (() => {
+  const candidates = [
+    process.env.PYTHON311,
+    "C:\\Users\\L\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+    "python3.11", "python311", "python3", "python"
+  ];
+  for (const c of candidates) {
+    if (!c) continue;
+    try {
+      const result = require("child_process").execFileSync(c, ["--version"], { timeout: 5000 });
+      if (result.toString().includes("3.11")) return c;
+    } catch (e) { /* try next */ }
+  }
+  return null;
+})();
+console.log(`[Init] Python 3.11: ${PYTHON311 || "NOT FOUND (binary conversion disabled)"}`);
+
+// Converter script path
+const CONVERTER_SCRIPT = path.join(__dirname, "ascii2binary.py");
+const HAS_BINARY_CONVERTER = PYTHON311 && fs.existsSync(CONVERTER_SCRIPT);
+console.log(`[Init] Binary converter: ${HAS_BINARY_CONVERTER ? CONVERTER_SCRIPT : "NOT AVAILABLE"}`);
 
 // AD 集成临时输出目录
 const AD_TEMP_DIR = path.join(os.tmpdir(), "LCSC-AD-Transfer");
@@ -506,25 +532,59 @@ app.get("/ad-place/:id", async (req, res) => {
       }
     }
 
-    // Step 4: 转换格式 (.SchDoc → .SchLib, .PcbDoc → .PcbLib)
-    const schLibContent = schDocToSchLib(schContent, title);
-    // PcbDoc 中的 BOARD 记录不需要全部删除 — 封装定义数据在后面的 RECORD 中
-    const pcbLibContent = pcbDocToPcbLib(pcbContent, title);
-
-    // Step 5: 保存到临时目录 (同时保存原始 .SchDoc 供 fallback)
+    // Step 4: 保存 ASCII SchDoc/PcbDoc 到临时目录
     const safeTitle = title.replace(/[\\/:*?"<>|]/g, "_");
-    const schLibPath = path.join(AD_TEMP_DIR, `${id}_${safeTitle}.SchLib`);
-    const pcbLibPath = path.join(AD_TEMP_DIR, `${id}_${safeTitle}.PcbLib`);
     const schDocPath = path.join(AD_TEMP_DIR, `${id}_${safeTitle}.SchDoc`);
     const pcbDocPath = path.join(AD_TEMP_DIR, `${id}_${safeTitle}.PcbDoc`);
+    const schLibPath = path.join(AD_TEMP_DIR, `${id}_${safeTitle}.SchLib`);
+    const pcbLibPath = path.join(AD_TEMP_DIR, `${id}_${safeTitle}.PcbLib`);
 
-    fs.writeFileSync(schLibPath, schLibContent, "utf-8");
-    fs.writeFileSync(pcbLibPath, pcbLibContent, "utf-8");
     fs.writeFileSync(schDocPath, schContent, "utf-8");
     fs.writeFileSync(pcbDocPath, pcbContent, "utf-8");
 
-    console.log(`[AD-Place] SchLib=${schLibContent.length}B, PcbLib=${pcbLibContent.length}B`);
-    console.log(`[AD-Place] SchDoc=${schContent.length}B, PcbDoc=${pcbContent.length}B`);
+    // Write ASCII SchLib as fallback (in case binary conversion fails)
+    const schLibContent = schDocToSchLib(schContent, title);
+    const pcbLibContent = pcbDocToPcbLib(pcbContent, title);
+    fs.writeFileSync(schLibPath, schLibContent, "utf-8");
+    fs.writeFileSync(pcbLibPath, pcbLibContent, "utf-8");
+
+    console.log(`[AD-Place] ASCII SchDoc=${schContent.length}B, PcbDoc=${pcbContent.length}B`);
+
+    // Step 4.5: 调用 Python 生成二进制 SchLib/PcbLib (altium-monkey)
+    let binSchLibPath = "";
+    let binPcbLibPath = "";
+
+    if (HAS_BINARY_CONVERTER) {
+      try {
+        const { stdout } = await execFileAsync(PYTHON311, [
+          CONVERTER_SCRIPT, "--sch", schDocPath,
+          "-o", schLibPath, "--title", title
+        ], { timeout: 30000 });
+        binSchLibPath = (stdout || "").trim();
+        if (binSchLibPath && fs.existsSync(binSchLibPath)) {
+          console.log(`[AD-Place] Binary SchLib: ${binSchLibPath} (${fs.statSync(binSchLibPath).size}B)`);
+        } else {
+          binSchLibPath = "";
+        }
+      } catch (e) {
+        console.warn(`[AD-Place] Binary SchLib failed: ${e.message}`);
+      }
+
+      try {
+        const { stdout } = await execFileAsync(PYTHON311, [
+          CONVERTER_SCRIPT, "--pcb", pcbDocPath,
+          "-o", pcbLibPath, "--title", pkg
+        ], { timeout: 30000 });
+        binPcbLibPath = (stdout || "").trim();
+        if (binPcbLibPath && fs.existsSync(binPcbLibPath)) {
+          console.log(`[AD-Place] Binary PcbLib: ${binPcbLibPath} (${fs.statSync(binPcbLibPath).size}B)`);
+        } else {
+          binPcbLibPath = "";
+        }
+      } catch (e) {
+        console.warn(`[AD-Place] Binary PcbLib failed: ${e.message}`);
+      }
+    }
 
     // Step 5.5: 下载 3D 模型 (STEP 格式优先)
     let stepPath = "";
@@ -559,7 +619,14 @@ app.get("/ad-place/:id", async (req, res) => {
 
     // Step 6: 返回管道分隔格式 (VBScript 易解析)
     // 格式: success|schLibPath|pcbLibPath|schDocPath|pcbDocPath|stepPath|title|package|model3dUuid
-    res.send(`success|${schLibPath}|${pcbLibPath}|${schDocPath}|${pcbDocPath}|${stepPath}|${title}|${pkg}|${model3dUuid}`);
+    //        |binSchLibPath|binPcbLibPath
+    // schLibPath/pcbLibPath: ASCII fallback (SchDoc/PcbDoc header swap)
+    // binSchLibPath/binPcbLibPath: true binary OLE files (PlaceSchComponent ready)
+    // schDocPath/pcbDocPath: original ASCII SchDoc/PcbDoc (direct open)
+    res.send(
+      `success|${schLibPath}|${pcbLibPath}|${schDocPath}|${pcbDocPath}|${stepPath}|` +
+      `${title}|${pkg}|${model3dUuid}|${binSchLibPath}|${binPcbLibPath}`
+    );
 
   } catch (error) {
     console.error(`[AD-Place] Error: ${error.message}`);
