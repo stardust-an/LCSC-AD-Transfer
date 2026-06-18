@@ -1,19 +1,22 @@
 '=============================================================================
-' LCSC-AD-Transfer v8 -- Auto-start server + Open SchDoc & PcbDoc
+' LCSC-AD-Transfer -- Altium Designer One-Click Component Loader
 '=============================================================================
-' Checks if local converter server is running. If not, starts it automatically.
-' Then downloads and opens SchDoc + PcbDoc in AD for each LCSC part number.
+' Auto-detects project directory. Auto-starts converter server.
+' Opens SchDoc + PcbDoc + 3D step for each LCSC part number in AD tabs.
 '
-' Config: Edit PROJECT_DIR below if you moved the project folder.
+' Toolbar config:
+'   ProjectName=...\AD-Plugin\LCSC-AD-Transfer.PrjScr
+'   ProcName=lcsc_place.vbs
 '=============================================================================
 
 Option Explicit
 
-' ---- User Configuration ----------------------------------------------------
-Const PROJECT_DIR    = "D:\Download\LCSC-AD-Transfer"   ' Change if you moved the project
-Const CONVERTER_URL  = "http://localhost:3001"
-Const SERVER_TIMEOUT = 60000
-Const SERVER_START_WAIT = 10000   ' Max wait for server to start (ms)
+Const CONVERTER_URL      = "http://localhost:3001"
+Const SERVER_TIMEOUT     = 60000
+Const SERVER_START_WAIT  = 10000
+
+' Auto-detected at startup
+Dim g_ProjectDir
 
 '=============================================================================
 ' Main
@@ -21,7 +24,6 @@ Const SERVER_START_WAIT = 10000   ' Max wait for server to start (ms)
 Sub Main()
     Dim currentSheet, inputStr, codes, i, code, count, failCount
 
-    ' Ensure schematic is open
     On Error Resume Next
     Set currentSheet = SchServer.GetCurrentSchDocument
     On Error GoTo 0
@@ -31,15 +33,23 @@ Sub Main()
         Exit Sub
     End If
 
-    ' Auto-start server if needed
-    If Not EnsureServerRunning() Then
-        MsgBox "Cannot start converter server." & vbCrLf & vbCrLf & _
-               "Please start manually: double-click start_server.bat" & vbCrLf & _
-               "Project dir: " & PROJECT_DIR, vbCritical, "LCSC-AD-Transfer"
+    g_ProjectDir = FindProjectDir()
+    If g_ProjectDir = "" Then
+        MsgBox "Cannot find project directory." & vbCrLf & vbCrLf & _
+               "Expected structure:" & vbCrLf & _
+               "  .../LCSC-AD-Transfer/converter/server.js" & vbCrLf & vbCrLf & _
+               "Ensure the .PrjScr file is inside the AD-Plugin folder.", _
+               vbCritical, "LCSC-AD-Transfer"
         Exit Sub
     End If
 
-    ' Get input
+    If Not EnsureServerRunning() Then
+        MsgBox "Cannot start converter server." & vbCrLf & vbCrLf & _
+               "Run manually: " & g_ProjectDir & "\start_server.bat", _
+               vbCritical, "LCSC-AD-Transfer"
+        Exit Sub
+    End If
+
     inputStr = InputBox( _
         "Enter LCSC part number(s)" & vbCrLf & _
         "(comma/space/semicolon separated):" & vbCrLf & vbCrLf & _
@@ -62,7 +72,6 @@ Sub Main()
         End If
     Next
 
-    ' Go back to user schematic
     On Error Resume Next
     Client.ShowDocument currentSheet
     On Error GoTo 0
@@ -70,65 +79,138 @@ Sub Main()
     If count > 0 Then
         MsgBox "Opened " & count & " component tab(s)." & vbCrLf & vbCrLf & _
                "Ctrl+Tab -> component tab -> Ctrl+C" & vbCrLf & _
-               "Ctrl+Tab -> schematic -> Ctrl+V -> click to place" & vbCrLf & vbCrLf & _
-               "Temp files: " & GetTempDir(), vbInformation, "LCSC-AD-Transfer"
+               "Ctrl+Tab -> schematic -> Ctrl+V -> click to place", _
+               vbInformation, "LCSC-AD-Transfer"
     End If
 End Sub
 
 '=============================================================================
-' Auto-start server
+' Auto-detect project root directory
+' Strategy:
+'   1. Get .PrjScr project path from AD Client API -> walk up 2 levels
+'   2. Fallback: search from current dir upward for converter\server.js
+'   3. Fallback: scan common drive roots
+'=============================================================================
+Function FindProjectDir()
+    Dim fso, dir
+
+    Set fso = CreateObject("Scripting.FileSystemObject")
+
+    ' ---- Method 1: Get project path from AD ----
+    Dim proj, projPath
+    On Error Resume Next
+    Set proj = Client.GetCurrentProject
+    If Not proj Is Nothing Then
+        projPath = proj.DM_ProjectFullPath
+        If Not IsEmpty(projPath) And projPath <> "" Then
+            dir = fso.GetParentFolderName(projPath)         ' AD-Plugin\
+            dir = fso.GetParentFolderName(dir)               ' project root
+            If fso.FileExists(dir & "\converter\server.js") Then
+                FindProjectDir = dir
+                Exit Function
+            End If
+        End If
+    End If
+    On Error GoTo 0
+
+    ' ---- Method 2: Walk up from working directory ----
+    dir = fso.GetAbsolutePathName(".")
+    Do While Len(dir) > 3
+        If fso.FileExists(dir & "\converter\server.js") Then
+            FindProjectDir = dir
+            Exit Function
+        End If
+        Dim parent : parent = fso.GetParentFolderName(dir)
+        If parent = dir Then Exit Do
+        dir = parent
+    Loop
+
+    ' ---- Method 3: Scan common locations ----
+    Dim roots, i
+    roots = Array("D:\", "C:\", "E:\", "F:\")
+    For i = 0 To UBound(roots)
+        dir = roots(i)
+        If fso.FolderExists(dir) Then
+            FindProjectDir = ScanForProject(fso, dir, 2)
+            If FindProjectDir <> "" Then Exit Function
+        End If
+    Next
+
+    FindProjectDir = ""
+End Function
+
+Function ScanForProject(fso, baseDir, depth)
+    If depth <= 0 Then
+        ScanForProject = ""
+        Exit Function
+    End If
+
+    Dim folder, subFolder
+    On Error Resume Next
+    Set folder = fso.GetFolder(baseDir)
+    If folder Is Nothing Then
+        ScanForProject = ""
+        Exit Function
+    End If
+
+    For Each subFolder In folder.SubFolders
+        If fso.FileExists(subFolder.Path & "\converter\server.js") Then
+            ScanForProject = subFolder.Path
+            Exit Function
+        End If
+        Dim found : found = ScanForProject(fso, subFolder.Path, depth - 1)
+        If found <> "" Then
+            ScanForProject = found
+            Exit Function
+        End If
+    Next
+    On Error GoTo 0
+
+    ScanForProject = ""
+End Function
+
+'=============================================================================
+' Auto-start converter server
 '=============================================================================
 Function EnsureServerRunning()
-    Dim http, shell, fso, batPath, cmd, startTime
+    Dim http, shell, fso, serverJs, cmd, startTime
 
     EnsureServerRunning = False
 
-    ' Quick check: is server already running?
     If PingServer() Then
         EnsureServerRunning = True
         Exit Function
     End If
 
-    ShowStatus "Server not running, attempting auto-start..."
+    ShowStatus "Starting converter server..."
 
-    ' Find start_server.bat
     Set fso = CreateObject("Scripting.FileSystemObject")
-    batPath = PROJECT_DIR & "\start_server.bat"
-    If Not fso.FileExists(batPath) Then
-        ' Try relative to current dir
-        batPath = fso.GetAbsolutePathName(".") & "\start_server.bat"
-        If Not fso.FileExists(batPath) Then
-            ShowStatus "Cannot find start_server.bat"
-            Exit Function
-        End If
+    serverJs = g_ProjectDir & "\converter\server.js"
+    If Not fso.FileExists(serverJs) Then
+        ShowStatus "server.js not found: " & serverJs
+        Exit Function
     End If
 
-    ' Start server (hidden window)
     On Error Resume Next
     Set shell = CreateObject("WScript.Shell")
-    cmd = "cmd /c cd /d """ & fso.GetParentFolderName(batPath) & _
-          "\converter"" && start /min ""LCSC-Server"" node server.js"
+    cmd = "cmd /c cd /d """ & fso.GetParentFolderName(serverJs) & _
+          """ && start /min ""LCSC-Server"" node server.js"
     shell.Run cmd, 0, False
     On Error GoTo 0
 
-    ' Wait for server to become ready
     startTime = Timer
     Do While (Timer - startTime) * 1000 < SERVER_START_WAIT
         If PingServer() Then
-            ShowStatus "Server started successfully"
+            ShowStatus "Server started"
             EnsureServerRunning = True
             Exit Function
         End If
-        ' Sleep ~1 second using ping trick (VBScript has no native sleep)
         shell.Run "ping -n 2 127.0.0.1 >nul", 0, True
     Loop
 
     ShowStatus "Server start timed out"
 End Function
 
-'=============================================================================
-' Quick HTTP ping to check if server is alive
-'=============================================================================
 Function PingServer()
     Dim http
     On Error Resume Next
@@ -138,18 +220,16 @@ Function PingServer()
         PingServer = False
         Exit Function
     End If
-
     http.Open "GET", CONVERTER_URL & "/", False
     http.SetTimeouts 3000, 3000, 3000, 3000
     http.Send
-
     PingServer = (http.Status = 200)
     Set http = Nothing
     On Error GoTo 0
 End Function
 
 '=============================================================================
-' Helpers
+' Parse input, download, open files
 '=============================================================================
 Function ParseCodes(inputStr)
     Dim s
@@ -210,6 +290,7 @@ Function DownloadAndOpen(lcscId)
     If has3D Then statusMsg = statusMsg & "+3D"
     statusMsg = statusMsg & " opened"
     ShowStatus statusMsg
+
     DownloadAndOpen = True
 End Function
 
@@ -240,7 +321,5 @@ Function GetFromServer(lcscId)
 End Function
 
 Sub ShowStatus(msg)
-    On Error Resume Next
-    ShowMessage msg
-    On Error GoTo 0
+    ' Intentionally empty — avoids AD ShowMessage popups
 End Sub

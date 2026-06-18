@@ -81,13 +81,23 @@ AD 打开 .SchDoc 标签页  +  .PcbDoc 标签页
 
 | 步骤 | 操作 |
 |------|------|
-| 1 | AD 中：`文件` → `运行脚本...` → 选择 `lcsc_place.vbs` |
-| 2 | 输入 LCSC 料号，如 `C8734` 或 `C8734, C2040, C5446` |
-| 3 | 脚本自动检测并启动后台转换服务 |
-| 4 | 每个元器件的 SchDoc + PcbDoc 作为标签页在 AD 中打开 |
-| 5 | 在标签页中 `Ctrl+C`，切换到原理图 `Ctrl+V`，点击放置 |
+| 1 | 将工具栏按钮参数设为：`ProjectName=D:\Download\LCSC-AD-Transfer\AD-Plugin\LCSC-AD-Transfer.PrjScr`，`ProcName=lcsc_place.vbs` |
+| 2 | 点击工具栏按钮（或通过 `文件` → `运行脚本...` 选择 `.PrjScr` 文件） |
+| 3 | 输入 LCSC 料号，如 `C8734` 或 `C8734, C2040, C5446` |
+| 4 | 脚本自动检测并启动后台转换服务 |
+| 5 | 每个元器件的 SchDoc + PcbDoc 作为标签页在 AD 中打开 |
+| 6 | 在标签页中 `Ctrl+C`，切换到原理图 `Ctrl+V`，点击放置 |
 
-> **注意**：如果项目目录不是 `D:\Download\LCSC-AD-Transfer`，请编辑 `lcsc_place.vbs` 顶部的 `PROJECT_DIR` 常量。
+### 工具栏配置
+
+在 AD 工具栏右键 → `Customize...` → 新建按钮，参数设置为：
+
+```
+ProjectName=D:\Download\LCSC-AD-Transfer\AD-Plugin\LCSC-AD-Transfer.PrjScr
+ProcName=lcsc_place.vbs
+```
+
+> **注意**：如果项目目录不在 `D:\Download\LCSC-AD-Transfer`，请编辑 `AD-Plugin\lcsc_place.vbs` 顶部的 `PROJECT_DIR` 常量，并相应修改工具栏的 `ProjectName` 路径。
 
 ### 转换服务 API
 
@@ -222,11 +232,14 @@ LCSC 料号 (如 C8734)
 LCSC-AD-Transfer/
 ├── README.md                    # 本说明文档
 ├── LICENSE                      # MIT 许可证
+├── .gitignore
 ├── requirements.txt             # Python 依赖 (requests)
 ├── lcsc_ad_downloader.py        # Python CLI 下载工具
-├── lcsc_place.vbs               # Altium Designer 集成脚本
 ├── start_server.bat             # Windows 启动脚本
 ├── start_server.sh              # Linux/macOS 启动脚本
+├── AD-Plugin/                   # Altium Designer 脚本插件
+│   ├── LCSC-AD-Transfer.PrjScr  # AD 脚本项目文件
+│   └── lcsc_place.vbs           # AD 集成脚本
 ├── converter/                   # Node.js 转换服务
 │   ├── server.js                # Express API 服务
 │   ├── jsapi.min.js             # 立创 EDA 官方 JSAPI 转换库
