@@ -36,9 +36,13 @@ Sub Main()
     g_ProjectDir = FindProjectDir()
     If g_ProjectDir = "" Then
         MsgBox "Cannot find project directory." & vbCrLf & vbCrLf & _
-               "Expected structure:" & vbCrLf & _
-               "  .../LCSC-AD-Transfer/converter/server.js" & vbCrLf & vbCrLf & _
-               "Ensure the .PrjScr file is inside the AD-Plugin folder.", _
+               "Expected folder layout:" & vbCrLf & _
+               "  <project>\converter\server.js" & vbCrLf & _
+               "  <project>\AD-Plugin\LCSC-AD-Transfer.PrjScr" & vbCrLf & vbCrLf & _
+               "Troubleshooting:" & vbCrLf & _
+               "  1. Is the .PrjScr file inside the AD-Plugin folder?" & vbCrLf & _
+               "  2. Does converter\server.js exist in the parent folder?" & vbCrLf & _
+               "  3. Try running start_server.bat manually first.", _
                vbCritical, "LCSC-AD-Transfer"
         Exit Sub
     End If
@@ -87,33 +91,89 @@ End Sub
 '=============================================================================
 ' Auto-detect project root directory
 ' Strategy:
-'   1. Get .PrjScr project path from AD Client API -> walk up 2 levels
-'   2. Fallback: search from current dir upward for converter\server.js
-'   3. Fallback: scan common drive roots
+'   0. Get the SCRIPT project (.PrjScr) path via AD ScriptingSystem API
+'   1. Try Client.GetCurrentProject — handle both PrjScr and PrjPcb cases
+'   2. Walk up from AD current directory looking for converter\server.js
+'   3. Scan common drive roots with sufficient depth
 '=============================================================================
 Function FindProjectDir()
-    Dim fso, dir
+    Dim fso, dir, projPath
 
     Set fso = CreateObject("Scripting.FileSystemObject")
 
-    ' ---- Method 1: Get project path from AD ----
-    Dim proj, projPath
+    ' ---- Method 0: Get SCRIPT project path from AD ScriptingSystem ----
+    ' This is the most reliable method — it finds the .PrjScr that
+    ' contains this very script, regardless of what PCB project is open.
+    Dim scriptSys, sp, j
+    On Error Resume Next
+    Set scriptSys = Client.GetScriptingSystem
+    If Not scriptSys Is Nothing Then
+        ' 0a. Try CurrentScriptProject (single project, some AD versions)
+        Set sp = scriptSys.CurrentScriptProject
+        If Not sp Is Nothing Then
+            projPath = sp.DM_ProjectFullPath
+            If Not IsEmpty(projPath) And projPath <> "" Then
+                dir = fso.GetParentFolderName(projPath)     ' AD-Plugin\
+                dir = fso.GetParentFolderName(dir)           ' project root
+                If fso.FileExists(dir & "\converter\server.js") Then
+                    FindProjectDir = dir
+                    Exit Function
+                End If
+            End If
+        End If
+        ' 0b. Iterate ScriptProject collection (other AD versions)
+        If scriptSys.ScriptProjectCount > 0 Then
+            For j = 0 To scriptSys.ScriptProjectCount - 1
+                Set sp = scriptSys.ScriptProject(j)
+                If Not sp Is Nothing Then
+                    projPath = sp.DM_ProjectFullPath
+                    If Not IsEmpty(projPath) And projPath <> "" Then
+                        dir = fso.GetParentFolderName(projPath)     ' AD-Plugin\
+                        dir = fso.GetParentFolderName(dir)           ' project root
+                        If fso.FileExists(dir & "\converter\server.js") Then
+                            FindProjectDir = dir
+                            Exit Function
+                        End If
+                    End If
+                End If
+            Next
+        End If
+    End If
+    On Error GoTo 0
+
+    ' ---- Method 1: Get project path from AD (handles both PrjScr & PrjPcb) ----
+    Dim proj
     On Error Resume Next
     Set proj = Client.GetCurrentProject
     If Not proj Is Nothing Then
         projPath = proj.DM_ProjectFullPath
         If Not IsEmpty(projPath) And projPath <> "" Then
-            dir = fso.GetParentFolderName(projPath)         ' AD-Plugin\
-            dir = fso.GetParentFolderName(dir)               ' project root
+            Dim ext : ext = LCase(fso.GetExtensionName(projPath))
+            If ext = "prjscr" Then
+                ' Script project: PrjScr is in AD-Plugin\ → root is 2 levels up
+                dir = fso.GetParentFolderName(projPath)
+                dir = fso.GetParentFolderName(dir)
+            Else
+                ' PCB project (.PrjPcb): typically at project root → 1 level up
+                dir = fso.GetParentFolderName(projPath)
+            End If
             If fso.FileExists(dir & "\converter\server.js") Then
                 FindProjectDir = dir
                 Exit Function
+            End If
+            ' Also try 1 more level up for PrjPcb in subfolder (e.g. Project/MyBoard.PrjPcb)
+            If ext <> "prjscr" Then
+                dir = fso.GetParentFolderName(dir)
+                If fso.FileExists(dir & "\converter\server.js") Then
+                    FindProjectDir = dir
+                    Exit Function
+                End If
             End If
         End If
     End If
     On Error GoTo 0
 
-    ' ---- Method 2: Walk up from working directory ----
+    ' ---- Method 2: Walk up from AD working directory ----
     dir = fso.GetAbsolutePathName(".")
     Do While Len(dir) > 3
         If fso.FileExists(dir & "\converter\server.js") Then
@@ -125,13 +185,13 @@ Function FindProjectDir()
         dir = parent
     Loop
 
-    ' ---- Method 3: Scan common locations ----
+    ' ---- Method 3: Scan common drive roots (increased depth) ----
     Dim roots, i
     roots = Array("D:\", "C:\", "E:\", "F:\")
     For i = 0 To UBound(roots)
         dir = roots(i)
         If fso.FolderExists(dir) Then
-            FindProjectDir = ScanForProject(fso, dir, 2)
+            FindProjectDir = ScanForProject(fso, dir, 4)
             If FindProjectDir <> "" Then Exit Function
         End If
     Next
