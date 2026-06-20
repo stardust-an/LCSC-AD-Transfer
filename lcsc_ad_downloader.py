@@ -12,8 +12,7 @@ LCSC-AD-Transfer — 立创商城元器件批量下载工具
   python lcsc_ad_downloader.py C8734 --no-3d                   # 不下载 3D 模型
 
 前置条件:
-  需要先启动本地转换服务:
-    cd converter && node server.js
+  需要安装 Node.js 16+ (脚本会自动启动转换服务)
 """
 
 import os
@@ -21,6 +20,8 @@ import sys
 import json
 import time
 import argparse
+import platform
+import subprocess
 import urllib.request
 from pathlib import Path
 
@@ -48,6 +49,92 @@ def check_server():
                 return True
     except Exception:
         pass
+    return False
+
+
+def start_server():
+    """尝试自动启动本地转换服务"""
+    script_dir = Path(__file__).parent
+    converter_dir = script_dir / "converter"
+    server_js = converter_dir / "server.js"
+
+    if not server_js.exists():
+        print(f"❌ 错误: 未找到 converter/server.js")
+        return False
+
+    # 检查 Node.js 是否可用
+    try:
+        result = subprocess.run(
+            ["node", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            print("❌ 错误: Node.js 不可用，请先安装 Node.js 16+")
+            return False
+        print(f"  Node.js {result.stdout.strip()}")
+    except FileNotFoundError:
+        print("❌ 错误: 未找到 Node.js，请先安装 Node.js 16+")
+        print("           下载: https://nodejs.org/")
+        return False
+    except subprocess.TimeoutExpired:
+        print("❌ 错误: Node.js 响应超时")
+        return False
+
+    # 检查依赖
+    node_modules = converter_dir / "node_modules"
+    express_module = converter_dir / "node_modules" / "express"
+    if not node_modules.exists() or not express_module.exists():
+        print("  安装依赖: npm install...")
+        result = subprocess.run(
+            ["npm", "install"],
+            cwd=str(converter_dir),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            print(f"❌ 错误: npm install 失败")
+            if result.stderr:
+                print(f"  {result.stderr.strip()[:500]}")
+            return False
+        print("  依赖安装完成")
+
+    # 启动服务
+    print("  启动转换服务...")
+    try:
+        if platform.system() == "Windows":
+            # DETACHED_PROCESS (0x00000008) + CREATE_NO_WINDOW (0x08000000)
+            proc = subprocess.Popen(
+                ["node", "server.js"],
+                cwd=str(converter_dir),
+                creationflags=subprocess.DETACHED_PROCESS | 0x08000000,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            proc = subprocess.Popen(
+                ["node", "server.js"],
+                cwd=str(converter_dir),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception as e:
+        print(f"❌ 错误: 无法启动服务进程: {e}")
+        return False
+
+    # 等待服务就绪（最多 15 秒）
+    for _ in range(15):
+        time.sleep(1)
+        if check_server():
+            print("✓ 转换服务已启动")
+            return True
+
+    print("❌ 错误: 服务启动超时 (15s)")
+    print("   可能原因: 端口 3001 被占用或依赖缺失")
+    print("   手动排查: cd converter && node server.js")
     return False
 
 
@@ -253,13 +340,16 @@ def main():
     print(f"  转换服务: {CONVERTER_URL}")
     print()
 
-    # 检查服务
+    # 检查服务，未运行时自动启动
     if not check_server():
-        print("❌ 错误: 转换服务未运行!")
-        print(f"   请先启动: cd converter && node server.js")
-        print(f"   服务地址: {CONVERTER_URL}")
-        sys.exit(1)
-    print("✓ 转换服务已连接")
+        print("⚡ 转换服务未运行，正在自动启动...")
+        if not start_server():
+            print()
+            print("   无法自动启动服务，你也可以手动启动:")
+            print(f"   cd converter && node server.js")
+            sys.exit(1)
+    else:
+        print("✓ 转换服务已连接")
     print()
 
     # 逐个下载
