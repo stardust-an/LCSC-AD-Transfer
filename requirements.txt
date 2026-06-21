@@ -1,1 +1,2 @@
 requests>=2.28.0
+altium-monkey>=2026.6.9

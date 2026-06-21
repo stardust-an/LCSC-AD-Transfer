@@ -30,26 +30,91 @@ app.use(express.json());
 const PORT = process.env.PORT || 3001;
 
 // Python 3.11 path for altium-monkey binary converter
+function _resolvePython(cmd) {
+  // If already an absolute path to python.exe, verify and return as-is
+  if (path.isAbsolute(cmd) && cmd.endsWith(".exe")) {
+    try {
+      const result = require("child_process").execFileSync(cmd, ["--version"], { timeout: 5000 });
+      const ver = result.toString();
+      if (ver.includes("3.11") || ver.includes("3.12")) return cmd;
+    } catch (e) { /* fall through */ }
+    return null;
+  }
+
+  // For bare commands, verify version then resolve to full path via pyenv or where
+  try {
+    const result = require("child_process").execFileSync("cmd", [
+      "/c", cmd + " --version"
+    ], { timeout: 5000, windowsHide: true });
+    const ver = result.toString();
+    if (!ver.includes("3.11") && !ver.includes("3.12")) return null;
+
+    // Try pyenv first (handles shims correctly)
+    try {
+      const pyenv = require("child_process").execFileSync("cmd", [
+        "/c", "pyenv which " + cmd
+      ], { timeout: 5000, windowsHide: true });
+      const exePath = pyenv.toString().trim();
+      if (exePath && fs.existsSync(exePath)) return exePath;
+    } catch (e) { /* pyenv not available */ }
+
+    // Fallback: where → prefer .exe
+    try {
+      const where = require("child_process").execFileSync("cmd", [
+        "/c", "where " + cmd
+      ], { timeout: 5000, windowsHide: true });
+      const lines = where.toString().trim().split(/\r?\n/);
+      const exe = lines.find(l => l.toLowerCase().endsWith(".exe"));
+      if (exe) return exe.trim();
+      const first = lines[0]?.trim();
+      if (first) return first;
+    } catch (e) { /* where failed */ }
+
+    return cmd; // last resort: bare command
+  } catch (e) { /* nope */ }
+  return null;
+}
+
 const PYTHON311 = (() => {
   const candidates = [
     process.env.PYTHON311,
     "C:\\Users\\L\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-    "python3.11", "python311", "python3", "python"
+    "C:\\Users\\L\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+    "C:\\Python311\\python.exe",
+    "C:\\Python312\\python.exe",
+    "python3.12", "python312",
+    "python3.11", "python311",
+    "python3", "python"
   ];
   for (const c of candidates) {
     if (!c) continue;
-    try {
-      const result = require("child_process").execFileSync(c, ["--version"], { timeout: 5000 });
-      if (result.toString().includes("3.11")) return c;
-    } catch (e) { /* try next */ }
+    const resolved = _resolvePython(c);
+    if (resolved) return resolved;
   }
   return null;
 })();
-console.log(`[Init] Python 3.11: ${PYTHON311 || "NOT FOUND (binary conversion disabled)"}`);
+console.log(`[Init] Python (3.11–3.12): ${PYTHON311 || "NOT FOUND (binary conversion disabled)"}`);
 
 // Converter script path
 const CONVERTER_SCRIPT = path.join(__dirname, "ascii2binary.py");
-const HAS_BINARY_CONVERTER = PYTHON311 && fs.existsSync(CONVERTER_SCRIPT);
+
+// 检查 altium-monkey 是否可用
+let ALTIUM_MONKEY_OK = false;
+if (PYTHON311 && fs.existsSync(CONVERTER_SCRIPT)) {
+  try {
+    const checkResult = require("child_process").execFileSync(PYTHON311, [
+      "-c", "import altium_monkey; print(altium_monkey.__version__)"
+    ], { timeout: 10000 });
+    const ver = (checkResult.toString() || "").trim();
+    console.log(`[Init] altium-monkey: ${ver}`);
+    ALTIUM_MONKEY_OK = true;
+  } catch (e) {
+    console.error(`[Init] altium-monkey: NOT FOUND — run: pip install altium-monkey>=2026.6.9`);
+    console.error(`[Init] Binary SchLib/PcbLib conversion will NOT be available.`);
+  }
+}
+
+const HAS_BINARY_CONVERTER = PYTHON311 && fs.existsSync(CONVERTER_SCRIPT) && ALTIUM_MONKEY_OK;
 console.log(`[Init] Binary converter: ${HAS_BINARY_CONVERTER ? CONVERTER_SCRIPT : "NOT AVAILABLE"}`);
 
 // AD 集成临时输出目录

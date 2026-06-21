@@ -13,6 +13,7 @@ LCSC-AD-Transfer — 立创商城元器件批量下载工具
 
 前置条件:
   需要安装 Node.js 16+ (脚本会自动启动转换服务)
+  需要 Python 依赖: requests, altium-monkey (缺失时自动安装)
 """
 
 import os
@@ -39,6 +40,97 @@ STEP_MODEL_URL = "https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/{uuid}"
 OBJ_MODEL_URL = "https://modules.easyeda.com/3dmodel/{uuid}"
 
 
+def _pip_install(python_exe, pkg_name):
+    """用指定 Python 安装 pip 包"""
+    print(f"  ⚡ 正在安装 {pkg_name}...")
+    try:
+        result = subprocess.run(
+            [python_exe, "-m", "pip", "install", pkg_name],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            print(f"  ✓ {pkg_name} 安装成功")
+            return True
+        else:
+            print(f"  ✗ {pkg_name} 安装失败")
+            if result.stderr:
+                lines = result.stderr.strip().split("\n")
+                for line in lines[-3:]:
+                    print(f"    {line}")
+            return False
+    except Exception as e:
+        print(f"  ✗ 安装 {pkg_name} 时出错: {e}")
+        return False
+
+
+def check_dependencies():
+    """
+    检查并自动安装运行时依赖:
+      - Node.js 16+     (必需, 无法自动安装)
+      - requests        (当前 Python 环境)
+      - altium-monkey   (当前 Python 环境, 二进制库转换需要)
+    返回 True 表示所有依赖就绪
+    """
+    all_ok = True
+
+    # ---- Node.js ----
+    print("[依赖检查] Node.js ...", end=" ")
+    try:
+        result = subprocess.run(
+            ["node", "--version"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            ver = result.stdout.strip()
+            print(ver)
+        else:
+            print("✗ 不可用")
+            all_ok = False
+    except FileNotFoundError:
+        print("✗ 未找到")
+        all_ok = False
+    except subprocess.TimeoutExpired:
+        print("✗ 超时")
+        all_ok = False
+
+    if not all_ok:
+        print("  ❌ 错误: 未找到 Node.js，请先安装 Node.js 16+")
+        print("           下载: https://nodejs.org/")
+
+    # ---- requests (当前 Python 环境) ----
+    print("[依赖检查] requests ...", end=" ")
+    try:
+        import requests  # noqa: F811
+        print(requests.__version__)
+    except ImportError:
+        print("✗ 未安装")
+        if _pip_install(sys.executable, "requests>=2.28.0"):
+            try:
+                import requests  # noqa: F811
+                print("  ✓ 导入成功")
+            except ImportError:
+                print("  ❌ 错误: requests 安装后仍无法导入")
+                all_ok = False
+        else:
+            all_ok = False
+
+    # ---- altium-monkey ----
+    print("[依赖检查] altium-monkey ...", end=" ")
+    try:
+        import altium_monkey  # noqa: F811
+        ver = getattr(altium_monkey, "__version__", "unknown")
+        print(ver)
+    except ImportError:
+        print("✗ 未安装")
+        if not _pip_install(sys.executable, "altium-monkey>=2026.6.9"):
+            print("  ❌ 错误: altium-monkey 自动安装失败")
+            print("         请手动执行: pip install altium-monkey>=2026.6.9")
+            print("         安装后重新运行本脚本")
+            all_ok = False
+
+    print()
+    return all_ok
+
+
 def check_server():
     """检查转换服务是否在运行"""
     try:
@@ -62,24 +154,16 @@ def start_server():
         print(f"❌ 错误: 未找到 converter/server.js")
         return False
 
-    # 检查 Node.js 是否可用
+    # 检查 Node.js (check_dependencies 已检查过, 这里是安全网)
     try:
         result = subprocess.run(
-            ["node", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+            ["node", "--version"], capture_output=True, text=True, timeout=5
         )
         if result.returncode != 0:
-            print("❌ 错误: Node.js 不可用，请先安装 Node.js 16+")
+            print("❌ 错误: Node.js 不可用")
             return False
-        print(f"  Node.js {result.stdout.strip()}")
-    except FileNotFoundError:
-        print("❌ 错误: 未找到 Node.js，请先安装 Node.js 16+")
-        print("           下载: https://nodejs.org/")
-        return False
-    except subprocess.TimeoutExpired:
-        print("❌ 错误: Node.js 响应超时")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print("❌ 错误: 未找到 Node.js")
         return False
 
     # 检查依赖
@@ -332,6 +416,13 @@ def main():
 
     # 去重
     ids = list(dict.fromkeys(ids))
+
+    # 检查依赖 (Node.js / requests / altium-monkey)
+    print("=" * 60)
+    core_ok = check_dependencies()
+    if not core_ok:
+        sys.exit(1)
+    print("=" * 60)
 
     print(f"LCSC-AD-Transfer — 立创元器件批量下载")
     print(f"  目标数量: {len(ids)}")
