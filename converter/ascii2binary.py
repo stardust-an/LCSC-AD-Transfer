@@ -97,7 +97,7 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
                 loc_y = int(float(rec.get("LOCATION.Y", "0")))
                 pin_len = int(float(rec.get("PINLENGTH", "10")))
                 conglomerate = int(rec.get("PINCONGLOMERATE", "58"))
-                rotation = Rotation90.DEG_180 if conglomerate == 56 else Rotation90.DEG_0
+                rotation = Rotation90.DEG_0 if conglomerate == 56 else Rotation90.DEG_180
                 color_val = int(rec.get("COLOR", "136"))
                 pin = am.make_sch_pin(
                     designator=rec.get("DESIGNATOR", ""),
@@ -105,7 +105,7 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
                     location_mils=SchPointMils(loc_x * 10, loc_y * 10),
                     length_mils=pin_len * 10,
                     orientation=rotation,
-                    electrical_type=PinElectrical.INPUT,
+                    electrical_type=PinElectrical.PASSIVE,
                     pin_color=ColorValue(color_val),
                     hidden=rec.get("ISHIDDEN", "F") == "T",
                     name_visible=True,
