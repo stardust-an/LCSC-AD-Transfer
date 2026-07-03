@@ -7,6 +7,7 @@ Requires: Python 3.11-3.12, altium-monkey>=2026.6.9
 import sys
 import re
 import argparse
+import shutil
 from pathlib import Path
 
 import altium_monkey as am
@@ -80,6 +81,11 @@ def get_line_width(val_str):
 
 def sch_ascii_to_schlib(ascii_content, title="Component"):
     lines = ascii_content.strip().split("\n")
+
+    # Count pins to determine if this is a basic component (few pins)
+    pin_count = sum(1 for l in lines if l.strip().startswith("|RECORD=2|"))
+    is_basic = pin_count <= 4  # R/C/L/D/Q etc.
+
     schlib = AltiumSchLib()
     symbol = schlib.add_symbol(title, description=title)
 
@@ -97,7 +103,7 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
                 loc_y = int(float(rec.get("LOCATION.Y", "0")))
                 pin_len = int(float(rec.get("PINLENGTH", "10")))
                 conglomerate = int(rec.get("PINCONGLOMERATE", "58"))
-                rotation = Rotation90.DEG_0 if conglomerate == 56 else Rotation90.DEG_180
+                rotation = Rotation90.DEG_0 if (conglomerate & 2) == 0 else Rotation90.DEG_180
                 color_val = int(rec.get("COLOR", "136"))
                 pin = am.make_sch_pin(
                     designator=rec.get("DESIGNATOR", ""),
@@ -108,28 +114,23 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
                     electrical_type=PinElectrical.PASSIVE,
                     pin_color=ColorValue(color_val),
                     hidden=rec.get("ISHIDDEN", "F") == "T",
-                    name_visible=True,
-                    designator_visible=True,
+                    name_visible=not is_basic,
+                    designator_visible=not is_basic,
                 )
-                symbol.add_object(pin)
+                symbol.add_pin(pin)
             except Exception as e:
                 print(f"  [WARN] Pin: {e}", file=sys.stderr)
 
-        # -- Line --
+        # -- Line (use convenience method for correct owner_part_id) --
         elif rt == 3:
             try:
-                sx = int(float(rec.get("LOCATION.X", "0")))
-                sy = int(float(rec.get("LOCATION.Y", "0")))
-                ex = int(float(rec.get("CORNER.X", "0")))
-                ey = int(float(rec.get("CORNER.Y", "0")))
+                sx = int(float(rec.get("LOCATION.X", "0"))) * 10
+                sy = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                ex = int(float(rec.get("CORNER.X", "0"))) * 10
+                ey = int(float(rec.get("CORNER.Y", "0"))) * 10
                 color = int(rec.get("COLOR", "0"))
                 lw = get_line_width(rec.get("LINEWIDTH", "1"))
-                line = am.make_sch_line(
-                    start_mils=SchPointMils(sx * 10, sy * 10),
-                    end_mils=SchPointMils(ex * 10, ey * 10),
-                    color=ColorValue(color), line_width=lw, line_style=LineStyle.SOLID,
-                )
-                symbol.add_object(line)
+                symbol.add_line(sx, sy, ex, ey, color=color, line_width=lw)
             except Exception as e:
                 print(f"  [WARN] Line: {e}", file=sys.stderr)
 
@@ -137,15 +138,13 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
         elif rt == 4:
             try:
                 n = int(rec.get("LOCATIONCOUNT", "0"))
-                pts = [SchPointMils(int(float(rec.get(f"X{i}", "0"))) * 10,
-                                   int(float(rec.get(f"Y{i}", "0"))) * 10)
+                pts = [(int(float(rec.get(f"X{i}", "0"))) * 10,
+                        int(float(rec.get(f"Y{i}", "0"))) * 10)
                        for i in range(1, n + 1)]
                 if pts:
-                    poly = am.make_sch_polyline(
-                        points_mils=pts, color=get_color(rec.get("COLOR")),
-                        line_width=get_line_width(rec.get("LINEWIDTH", "1")),
-                    )
-                    symbol.add_object(poly)
+                    symbol.add_polyline(pts,
+                        color=int(rec.get("COLOR", "0")),
+                        line_width=get_line_width(rec.get("LINEWIDTH", "1")))
             except Exception as e:
                 print(f"  [WARN] Polyline: {e}", file=sys.stderr)
 
@@ -153,41 +152,45 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
         elif rt == 5:
             try:
                 n = int(rec.get("LOCATIONCOUNT", "0"))
-                pts = [SchPointMils(int(float(rec.get(f"X{i}", "0"))) * 10,
-                                   int(float(rec.get(f"Y{i}", "0"))) * 10)
+                pts = [(int(float(rec.get(f"X{i}", "0"))) * 10,
+                        int(float(rec.get(f"Y{i}", "0"))) * 10)
                        for i in range(1, n + 1)]
                 if pts:
-                    poly = am.make_sch_polygon(
-                        points_mils=pts, color=get_color(rec.get("COLOR")),
-                        fill_color=get_color(rec.get("AREACOLOR")),
+                    is_solid = rec.get("ISSOLID", "F") == "T"
+                    color = int(rec.get("COLOR", "0"))
+                    area = int(rec.get("AREACOLOR", str(color)))
+                    symbol.add_polygon(pts,
+                        color=color,
+                        area_color=area if is_solid else 16777215,
                         line_width=get_line_width(rec.get("LINEWIDTH", "3")),
-                        transparent_fill=rec.get("TRANSPARENT", "F") == "T",
-                    )
-                    symbol.add_object(poly)
+                        is_solid=is_solid)
             except Exception as e:
                 print(f"  [WARN] Polygon: {e}", file=sys.stderr)
 
-        # -- Arc --
+        # -- Arc or Polyline (RECORD=6 used for BOTH by easyeda2altium) --
         elif rt == 6:
             try:
-                cx = int(float(rec.get("LOCATION.X", "0")))
-                cy = int(float(rec.get("LOCATION.Y", "0")))
-                radius = int(float(rec.get("RADIUS", "0")))
-                color = int(rec.get("COLOR", "0"))
-                lw = get_line_width(rec.get("LINEWIDTH", "1"))
-                start_a = float(rec.get("STARTANGLE", "0"))
-                end_a = float(rec.get("ENDANGLE", "360"))
-                arc = am.make_sch_arc(
-                    center_mils=SchPointMils(cx * 10, cy * 10),
-                    radius_mils=radius * 10,
-                    start_angle_degrees=start_a,
-                    end_angle_degrees=end_a,
-                    color=ColorValue(color),
-                    line_width=lw,
-                )
-                symbol.add_object(arc)
+                # Distinguish: LOCATIONCOUNT → Polyline; RADIUS → Arc
+                if rec.get("LOCATIONCOUNT"):
+                    n = int(rec.get("LOCATIONCOUNT", "0"))
+                    pts = [(int(float(rec.get(f"X{i}", "0"))) * 10,
+                            int(float(rec.get(f"Y{i}", "0"))) * 10)
+                           for i in range(1, n + 1)]
+                    if pts:
+                        symbol.add_polyline(pts,
+                            color=int(rec.get("COLOR", "0")),
+                            line_width=get_line_width(rec.get("LINEWIDTH", "1")))
+                else:
+                    cx = int(float(rec.get("LOCATION.X", "0"))) * 10
+                    cy = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                    radius = int(float(rec.get("RADIUS", "0"))) * 10
+                    symbol.add_arc(cx, cy, radius,
+                        start_angle=float(rec.get("STARTANGLE", "0")),
+                        end_angle=float(rec.get("ENDANGLE", "360")),
+                        color=int(rec.get("COLOR", "0")),
+                        line_width=get_line_width(rec.get("LINEWIDTH", "1")))
             except Exception as e:
-                print(f"  [WARN] Arc: {e}", file=sys.stderr)
+                print(f"  [WARN] Arc/Polyline(6): {e}", file=sys.stderr)
 
         # -- Ellipse --
         elif rt == 8:
@@ -199,11 +202,10 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
                 color = int(rec.get("COLOR", "0"))
                 area = int(rec.get("AREACOLOR", str(color)))
                 is_solid = rec.get("ISSOLID", "F") == "T"
-                lw = get_line_width(rec.get("LINEWIDTH", "1"))
                 symbol.add_ellipse(cx, cy, rx, ry,
                     color=color,
                     area_color=area if is_solid else 16777215,
-                    line_width=lw,
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
                     is_solid=is_solid)
             except Exception as e:
                 print(f"  [WARN] Ellipse: {e}", file=sys.stderr)
@@ -211,7 +213,6 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
         # -- Rounded Rectangle (body) --
         elif rt == 10:
             try:
-                # LOCATION and CORNER are two opposing corners (absolute coords)
                 x1 = int(float(rec.get("LOCATION.X", "0"))) * 10
                 y1 = int(float(rec.get("LOCATION.Y", "0"))) * 10
                 x2 = int(float(rec.get("CORNER.X", "0"))) * 10
@@ -219,15 +220,14 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
                 crx = int(float(rec.get("CORNERXRADIUS", "0"))) * 10
                 cry = int(float(rec.get("CORNERYRADIUS", "0"))) * 10
                 color = int(rec.get("COLOR", "0"))
-                is_solid = rec.get("ISSOLID", "F") == "T"
-                area = int(rec.get("AREACOLOR", str(color if is_solid else 16777215)))
-                lw = get_line_width(rec.get("LINEWIDTH", "1"))
+                # Fill body with light yellow (#FFFFB0 = 0xB0FFFF in Altium BGR),
+                # drawn behind pins because RECORD=10 appears before RECORD=2 in ASCII
                 symbol.add_rounded_rectangle(x1, y1, x2, y2,
                     corner_x_radius=crx, corner_y_radius=cry,
                     color=color,
-                    area_color=area if is_solid else 16777215,
-                    line_width=lw,
-                    is_solid=is_solid)
+                    area_color=0xB0FFFF,
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
+                    is_solid=True)
             except Exception as e:
                 print(f"  [WARN] RoundedRect: {e}", file=sys.stderr)
 
@@ -236,10 +236,10 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
             try:
                 text = rec.get("TEXT", "")
                 if text:
-                    x = int(float(rec.get("LOCATION.X", "0")))
-                    y = int(float(rec.get("LOCATION.Y", "0")))
+                    x = int(float(rec.get("LOCATION.X", "0"))) * 10
+                    y = int(float(rec.get("LOCATION.Y", "0"))) * 10
                     note = am.make_sch_note(
-                        bounds_mils=SchRectMils(x * 10, y * 10, x * 10 + 200, y * 10 + 50),
+                        bounds_mils=SchRectMils(x, y, x + 200, y + 50),
                         text=text,
                         font=SchFontSpec(name="Verdana", size=9),
                     )
@@ -250,22 +250,18 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
         # -- Rectangle --
         elif rt == 13:
             try:
-                x1 = int(float(rec.get("LOCATION.X", "0")))
-                y1 = int(float(rec.get("LOCATION.Y", "0")))
-                x2 = int(float(rec.get("CORNER.X", "0")))
-                y2 = int(float(rec.get("CORNER.Y", "0")))
+                x1 = int(float(rec.get("LOCATION.X", "0"))) * 10
+                y1 = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                x2 = int(float(rec.get("CORNER.X", "0"))) * 10
+                y2 = int(float(rec.get("CORNER.Y", "0"))) * 10
                 color = int(rec.get("COLOR", "0"))
                 is_solid = rec.get("ISSOLID", "F") == "T"
                 area = int(rec.get("AREACOLOR", str(color if is_solid else 16777215)))
-                lw = get_line_width(rec.get("LINEWIDTH", "1"))
-                rect = am.make_sch_rectangle(
-                    bounds_mils=SchRectMils(x1 * 10, y1 * 10, x2 * 10, y2 * 10),
-                    color=ColorValue(color),
-                    fill_color=ColorValue(area) if is_solid else None,
-                    line_width=lw,
-                    fill_background=False,
-                )
-                symbol.add_object(rect)
+                symbol.add_rectangle(x1, y1, x2, y2,
+                    color=color,
+                    area_color=area if is_solid else 16777215,
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
+                    is_solid=is_solid)
             except Exception as e:
                 print(f"  [WARN] Rectangle: {e}", file=sys.stderr)
 
@@ -322,7 +318,7 @@ def map_pad_shape(name):
     return PAD_SHAPE_MAP.get(name.upper().replace(" ", "").replace("_", ""), PadShape.RECTANGLE)
 
 
-def pcb_ascii_to_pcblib(ascii_content, title="Footprint"):
+def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
     lines = ascii_content.strip().split("\n")
     pcblib = AltiumPcbLib()
     footprint = pcblib.add_footprint(title, description=title, height="0mil")
@@ -421,6 +417,20 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint"):
         elif rt == "Region":
             pass
 
+    # Embed 3D STEP model if provided
+    if step_path and Path(step_path).exists():
+        try:
+            step_data = Path(step_path).read_bytes()
+            if len(step_data) > 1000:  # sanity check
+                model = pcblib.add_embedded_model(
+                    name=Path(step_path).name,
+                    model_data=step_data,
+                )
+                footprint.add_embedded_3d_model(model)
+                print(f"  [STEP] Embedded: {Path(step_path).name} ({len(step_data)}B)", file=sys.stderr)
+        except Exception as e:
+            print(f"  [WARN] 3D model: {e}", file=sys.stderr)
+
     return pcblib
 
 
@@ -435,6 +445,9 @@ def main():
     parser.add_argument("--title", default="Component", help="Component/footprint name")
     parser.add_argument("--sch", action="store_true", help="Convert SchDoc → SchLib")
     parser.add_argument("--pcb", action="store_true", help="Convert PcbDoc → PcbLib")
+    parser.add_argument("--step", help="Path to STEP 3D model file to embed in PcbLib")
+    parser.add_argument("--merge-schlib", help="Cumulative SchLib to merge symbol into")
+    parser.add_argument("--merge-pcblib", help="Cumulative PcbLib to merge footprint into")
     parser.add_argument("--stdin", action="store_true", help="Read from stdin")
     args = parser.parse_args()
 
@@ -450,7 +463,7 @@ def main():
         sys.exit(1)
 
     if args.pcb:
-        result = pcb_ascii_to_pcblib(content, title=args.title)
+        result = pcb_ascii_to_pcblib(content, title=args.title, step_path=args.step)
     else:
         result = sch_ascii_to_schlib(content, title=args.title)
 
@@ -461,6 +474,45 @@ def main():
 
     result.save(out_path)
     print(out_path)
+
+    # Merge into cumulative library if requested
+    if args.sch and args.merge_schlib:
+        try:
+            merge_path = Path(args.merge_schlib)
+            if merge_path.exists():
+                merged = AltiumSchLib.merge(
+                    input_paths=[str(merge_path), out_path],
+                    output_path=str(merge_path),
+                    handle_conflicts="rename",
+                    verbose=False,
+                )
+                # merge() saves as JSON — re-save as binary OLE
+                merged.save(merge_path)
+            else:
+                shutil.copy2(out_path, merge_path)
+            print(f"  [Merge] SchLib → {merge_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"  [WARN] SchLib merge failed: {e}", file=sys.stderr)
+
+    if args.pcb and args.merge_pcblib:
+        try:
+            merge_path = Path(args.merge_pcblib)
+            if merge_path.exists():
+                existing = AltiumPcbLib.from_file(merge_path)
+                new = AltiumPcbLib.from_file(out_path)
+                # Copy footprints from new to existing
+                for fp in new.footprints:
+                    existing.footprints.append(fp)
+                # Copy 3D models
+                for k, v in new.models_3d.items():
+                    if k not in existing.models_3d:
+                        existing.models_3d[k] = v
+                existing.save(merge_path)
+            else:
+                shutil.copy2(out_path, merge_path)
+            print(f"  [Merge] PcbLib → {merge_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"  [WARN] PcbLib merge failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

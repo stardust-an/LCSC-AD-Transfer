@@ -615,7 +615,41 @@ app.get("/ad-place/:id", async (req, res) => {
 
     console.log(`[AD-Place] ASCII SchDoc=${schContent.length}B, PcbDoc=${pcbContent.length}B`);
 
-    // Step 4.5: 调用 Python 生成二进制 SchLib/PcbLib (altium-monkey)
+    // Step 4.5: 下载 3D 模型 (STEP 格式优先) — 必须在二进制转换之前
+    let stepPath = "";
+    if (model3dUuid) {
+      const stepFile = path.join(AD_TEMP_DIR, `${id}.step`);
+      if (fs.existsSync(stepFile)) {
+        console.log(`[AD-Place] 3D model already exists: ${stepFile}`);
+        stepPath = stepFile;
+      } else {
+        const stepUrl = `https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/${model3dUuid}`;
+        try {
+          const stepResp = await fetch(stepUrl, {
+            headers: { "User-Agent": "Mozilla/5.0" }
+          });
+          if (stepResp.ok) {
+            const stepData = Buffer.from(await stepResp.arrayBuffer());
+            if (stepData.length > 1000) {
+              fs.writeFileSync(stepFile, stepData);
+              const sizeKb = (stepData.length / 1024).toFixed(1);
+              console.log(`[AD-Place] 3D model downloaded: ${stepFile} (${sizeKb} KB)`);
+              stepPath = stepFile;
+            }
+          } else {
+            console.log(`[AD-Place] 3D model not available (HTTP ${stepResp.status})`);
+          }
+        } catch (e) {
+          console.log(`[AD-Place] 3D model download failed: ${e.message}`);
+        }
+      }
+    }
+
+    // Cumulative library paths (accumulate all searched components)
+    const cumulativeSchLib = path.join(AD_TEMP_DIR, "LCSC-AD-Library.SchLib");
+    const cumulativePcbLib = path.join(AD_TEMP_DIR, "LCSC-AD-Library.PcbLib");
+
+    // Step 5: 调用 Python 生成二进制 SchLib/PcbLib (altium-monkey)
     let binSchLibPath = "";
     let binPcbLibPath = "";
 
@@ -623,7 +657,8 @@ app.get("/ad-place/:id", async (req, res) => {
       try {
         const { stdout } = await execFileAsync(PYTHON311, [
           CONVERTER_SCRIPT, "--sch", schDocPath,
-          "-o", schLibPath, "--title", title
+          "-o", schLibPath, "--title", title,
+          "--merge-schlib", cumulativeSchLib
         ], { timeout: 30000 });
         binSchLibPath = (stdout || "").trim();
         if (binSchLibPath && fs.existsSync(binSchLibPath)) {
@@ -636,10 +671,13 @@ app.get("/ad-place/:id", async (req, res) => {
       }
 
       try {
-        const { stdout } = await execFileAsync(PYTHON311, [
+        const pcbArgs = [
           CONVERTER_SCRIPT, "--pcb", pcbDocPath,
-          "-o", pcbLibPath, "--title", pkg
-        ], { timeout: 30000 });
+          "-o", pcbLibPath, "--title", pkg,
+          "--merge-pcblib", cumulativePcbLib
+        ];
+        if (stepPath) pcbArgs.push("--step", stepPath);
+        const { stdout } = await execFileAsync(PYTHON311, pcbArgs, { timeout: 30000 });
         binPcbLibPath = (stdout || "").trim();
         if (binPcbLibPath && fs.existsSync(binPcbLibPath)) {
           console.log(`[AD-Place] Binary PcbLib: ${binPcbLibPath} (${fs.statSync(binPcbLibPath).size}B)`);
@@ -648,37 +686,6 @@ app.get("/ad-place/:id", async (req, res) => {
         }
       } catch (e) {
         console.warn(`[AD-Place] Binary PcbLib failed: ${e.message}`);
-      }
-    }
-
-    // Step 5.5: 下载 3D 模型 (STEP 格式优先)
-    let stepPath = "";
-    if (model3dUuid) {
-      const stepFile = path.join(AD_TEMP_DIR, `${id}.step`);
-      // 如果已存在则跳过下载
-      if (fs.existsSync(stepFile)) {
-        console.log(`[AD-Place] 3D model already exists: ${stepFile}`);
-        stepPath = stepFile;
-      } else {
-        const stepUrl = `https://modules.easyeda.com/qAxj6KHrDKw4blvCG8QJPs7Y/${model3dUuid}`;
-        try {
-          const stepResp = await fetch(stepUrl, {
-            headers: { "User-Agent": "Mozilla/5.0" }
-          });
-          if (stepResp.ok) {
-            const stepData = Buffer.from(await stepResp.arrayBuffer());
-            if (stepData.length > 1000) {  // 有效文件至少 > 1KB
-              fs.writeFileSync(stepFile, stepData);
-              const sizeKb = (stepData.length / 1024).toFixed(1);
-              console.log(`[AD-Place] 3D model downloaded: ${stepFile} (${sizeKb} KB)`);
-              stepPath = stepFile;
-            }
-          } else {
-            console.log(`[AD-Place] 3D model not available (HTTP ${stepResp.status})`);
-          }
-        } catch (e) {
-          console.log(`[AD-Place] 3D model download failed: ${e.message}`);
-        }
       }
     }
 
