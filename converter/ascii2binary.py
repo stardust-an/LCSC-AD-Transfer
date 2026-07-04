@@ -510,30 +510,28 @@ def main():
     print(out_path)
 
     # Merge into cumulative library if requested
-    # Strategy: save individual files to components/ dir, rebuild cumulative via merge()
-    # Never use AltiumSchLib(filepath=...) to read back — it corrupts binary OLE files!
     if args.sch and args.merge_schlib:
         try:
             merge_path = Path(args.merge_schlib)
-            # Save individual component to components dir
             comp_dir = merge_path.parent / "components_sch"
             comp_dir.mkdir(parents=True, exist_ok=True)
             comp_file = comp_dir / (args.title + ".SchLib")
-            shutil.copy2(out_path, comp_file)  # overwrites old version if exists
+            shutil.copy2(out_path, comp_file)  # overwrites old if re-searched
 
             # Rebuild cumulative from all individual files
-            if comp_dir.exists():
-                sch_files = list(comp_dir.glob("*.SchLib"))
-                if sch_files:
-                    merged = AltiumSchLib.merge(
-                        input_paths=[str(f) for f in sch_files],
-                        output_path=str(merge_path),
-                        handle_conflicts="rename",
-                        verbose=False,
-                    )
-                    merged.save(merge_path)  # re-save as binary OLE
-            else:
-                shutil.copy2(out_path, merge_path)
+            sch_files = list(comp_dir.glob("*.SchLib"))
+            if sch_files:
+                # merge() writes JSON — save to temp to avoid I/O lock on merge_path
+                tmp_json = str(merge_path) + ".tmp"
+                merged = AltiumSchLib.merge(
+                    input_paths=[str(f) for f in sch_files],
+                    output_path=tmp_json,
+                    handle_conflicts="rename",
+                    verbose=False,
+                )
+                merged.save(merge_path)  # write binary OLE to final path
+                try: Path(tmp_json).unlink()
+                except: pass
             print(f"  [Merge] SchLib → {merge_path}", file=sys.stderr)
         except Exception as e:
             print(f"  [WARN] SchLib merge failed: {e}", file=sys.stderr)
@@ -541,28 +539,36 @@ def main():
     if args.pcb and args.merge_pcblib:
         try:
             merge_path = Path(args.merge_pcblib)
-            # Save individual footprint to components dir
             comp_dir = merge_path.parent / "components_pcb"
             comp_dir.mkdir(parents=True, exist_ok=True)
             comp_file = comp_dir / (args.title + ".PcbLib")
-            shutil.copy2(out_path, comp_file)  # overwrites old version if exists
+            shutil.copy2(out_path, comp_file)  # overwrites old if re-searched
 
             # Rebuild cumulative from all individual files
-            if comp_dir.exists():
-                pcb_files = list(comp_dir.glob("*.PcbLib"))
-                cumulative = AltiumPcbLib()
-                first = True
-                for pf in pcb_files:
-                    try:
-                        part = AltiumPcbLib.from_file(pf)
-                        for fp in part.footprints:
-                            cumulative.footprints.append(fp)
-                        for k, v in part.models_3d.items():
-                            if k not in cumulative.models_3d:
-                                cumulative.models_3d[k] = v
-                    except Exception:
-                        continue
-                cumulative.save(merge_path)
+            pcb_files = list(comp_dir.glob("*.PcbLib"))
+            if pcb_files:
+                # Use first file as base (preserves internal OLE structure)
+                cumulative = AltiumPcbLib.from_file(pcb_files[0])
+                # Add footprints from remaining files, dedup by name
+                for pf in pcb_files[1:]:
+                    part = AltiumPcbLib.from_file(pf)
+                    for fp in part.footprints:
+                        cumulative.footprints.append(fp)
+                    for k, v in part.models_3d.items():
+                        if k not in cumulative.models_3d:
+                            cumulative.models_3d[k] = v
+                # Dedup: last occurrence of each footprint name wins
+                seen = {}
+                for fp in cumulative.footprints:
+                    name = fp.name if hasattr(fp, 'name') else ''
+                    seen[name] = fp
+                cumulative.footprints = list(seen.values())
+                # Save to temp then rename (avoids I/O lock on in-use cumulative)
+                tmp_out = str(merge_path) + ".tmp"
+                cumulative.save(tmp_out)
+                try: merge_path.unlink()
+                except: pass
+                shutil.move(tmp_out, merge_path)
             else:
                 shutil.copy2(out_path, merge_path)
             print(f"  [Merge] PcbLib → {merge_path}", file=sys.stderr)

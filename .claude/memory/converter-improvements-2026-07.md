@@ -81,9 +81,17 @@ server.js 中 3D 模型下载移到二进制转换之前，PCB 转换时传 `--s
 `%TEMP%\LCSC-AD-Transfer\LCSC-AD-Library.SchLib`
 `%TEMP%\LCSC-AD-Transfer\LCSC-AD-Library.PcbLib`
 
-每次搜索新元件自动追加。重复搜索同一元件时覆盖旧版本（非追加）。实现方式：
-- SchLib: `to_json()` → 移除同名符号 → 追加 → `from_json()` → `save()`
-- PcbLib: `from_file()` → 移除同名封装 → 追加 → `save()`
+每次搜索新元件自动追加。重复搜索同一元件时覆盖旧版本（非追加）。
+
+**实现方式 (2026-07-04 最终版)**:
+- 独立文件保存到 `components_sch/` 和 `components_pcb/` 目录，重复料号直接覆盖
+- SchLib 累积库: `AltiumSchLib.merge()` 从目录重建 → JSON 写临时文件 → `save()` 写 OLE → 删临时文件
+- PcbLib 累积库: `from_file(first)` 为基底 → 追加其余封装 → `save(tmp)` → `shutil.move(tmp, final)`
+
+**关键 Bug (2026-07-04)**:
+1. `AltiumSchLib(filepath=...)` 构造函数会**覆写磁盘文件**（OLE → 被破坏），导致 PlaceSchComponent 拿到无效文件。**严禁**用此构造函数回读刚保存的独立 SchLib。
+2. 累积库写入目标文件时遇到 I/O error 32（文件被 AD 锁定），改用临时文件 + 重命名策略。
+3. PcbLib 空构造 `AltiumPcbLib()` 不含内部 OLE 结构，`save()` 产出损坏文件。必须用 `from_file()` 加载已有文件为基底。
 
 ## SCH 元件参数
 
