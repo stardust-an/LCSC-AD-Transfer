@@ -20,6 +20,7 @@
 - 代码修改前先说明思路，不要直接给出代码
 - 有多种实现方案时，列出选项让用户选择
 - 文档使用简体中文
+- 每轮对话评估是否更新.claude/memory/，是则将关键技术方案实现/变更，遇到bug产生原因/修复方案记录
 
 ## 记忆索引
 详细记录存放在 `.claude/memory/` 目录下，需要时按路径查阅：
@@ -27,3 +28,4 @@
 - [AD 插件 VBScript 模式](.claude/memory/ad-plugin-vbscript-pattern.md) — 为什么用 VBScript、运行方式、API 参考
 - [转换流水线](.claude/memory/conversion-pipeline.md) — EasyEDA API → jsapi.min.js → Altium 格式
 - [开发历程 2026-06](.claude/memory/dev-history-2026-06.md) — 方案演进和关键决策
+- [转换器改进 2026-07](.claude/memory/converter-improvements-2026-07.md) — 便利方法、引脚朝向、RECORD=6 双义、3D 嵌入、累积库、SCH 参数

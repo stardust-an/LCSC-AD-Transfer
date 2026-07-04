@@ -79,7 +79,7 @@ def get_line_width(val_str):
 # SchDoc ASCII → Binary SchLib
 # ============================================================
 
-def sch_ascii_to_schlib(ascii_content, title="Component"):
+def sch_ascii_to_schlib(ascii_content, title="Component", params=None):
     lines = ascii_content.strip().split("\n")
 
     # Count pins to determine if this is a basic component (few pins)
@@ -88,6 +88,21 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
 
     schlib = AltiumSchLib()
     symbol = schlib.add_symbol(title, description=title)
+
+    # Add component parameters (default NC, override with provided values)
+    default_params = {
+        "Manufacturer": "NC",
+        "MPN": "NC",
+        "LCSC": "NC",
+        "Price": "NC",
+        "Package": "NC",
+    }
+    if params:
+        default_params.update(params)
+    y_pos = 0
+    for pname, ptext in default_params.items():
+        symbol.add_parameter(name=pname, text=str(ptext), x=0, y=y_pos, is_hidden=True)
+        y_pos += 50  # stack parameters vertically
 
     for line in lines:
         l = line.strip()
@@ -103,7 +118,16 @@ def sch_ascii_to_schlib(ascii_content, title="Component"):
                 loc_y = int(float(rec.get("LOCATION.Y", "0")))
                 pin_len = int(float(rec.get("PINLENGTH", "10")))
                 conglomerate = int(rec.get("PINCONGLOMERATE", "58"))
-                rotation = Rotation90.DEG_0 if (conglomerate & 2) == 0 else Rotation90.DEG_180
+                # PINCONGLOMERATE % 4 encodes rotation: 0=0°, 1=270°, 2=180°, 3=90°
+                cong_mod = conglomerate % 4
+                if cong_mod == 0:
+                    rotation = Rotation90.DEG_0    # right
+                elif cong_mod == 1:
+                    rotation = Rotation90.DEG_90   # up
+                elif cong_mod == 2:
+                    rotation = Rotation90.DEG_180  # left
+                else:
+                    rotation = Rotation90.DEG_270  # down
                 color_val = int(rec.get("COLOR", "136"))
                 pin = am.make_sch_pin(
                     designator=rec.get("DESIGNATOR", ""),
@@ -396,6 +420,11 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
                 layer_str = rec.get("LAYER", "TOPOVERLAY")
                 if "MECHANICAL" in layer_str.upper():
                     continue
+                # Skip designator/comment — footprint doesn't need name labels
+                if rec.get("DESIGNATOR", "False") == "True":
+                    continue
+                if rec.get("COMMENT", "False") == "True":
+                    continue
                 text = decode_widestring(rec.get("WIDESTRING", ""))
                 if not text:
                     text = rec.get("STRING", "") or rec.get("TEXT", "")
@@ -407,8 +436,6 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
                     stroke_width_mils=parse_mil(rec.get("WIDTH", "1")),
                     rotation_degrees=float(rec.get("ROTATION", "0")),
                     layer=map_layer(layer_str),
-                    is_designator=rec.get("DESIGNATOR", "False") == "True",
-                    is_comment=rec.get("COMMENT", "False") == "True",
                     font_name=rec.get("FONTNAME", "Arial"),
                 )
             except Exception as e:
@@ -448,6 +475,8 @@ def main():
     parser.add_argument("--step", help="Path to STEP 3D model file to embed in PcbLib")
     parser.add_argument("--merge-schlib", help="Cumulative SchLib to merge symbol into")
     parser.add_argument("--merge-pcblib", help="Cumulative PcbLib to merge footprint into")
+    parser.add_argument("--lcsc", help="LCSC part number for component parameters")
+    parser.add_argument("--pkg", help="Package name for component parameters")
     parser.add_argument("--stdin", action="store_true", help="Read from stdin")
     args = parser.parse_args()
 
@@ -465,7 +494,12 @@ def main():
     if args.pcb:
         result = pcb_ascii_to_pcblib(content, title=args.title, step_path=args.step)
     else:
-        result = sch_ascii_to_schlib(content, title=args.title)
+        sch_params = {}
+        if args.lcsc:
+            sch_params["LCSC"] = args.lcsc
+        if args.pkg:
+            sch_params["Package"] = args.pkg
+        result = sch_ascii_to_schlib(content, title=args.title, params=sch_params)
 
     out_path = args.output
     if not out_path:
@@ -476,18 +510,28 @@ def main():
     print(out_path)
 
     # Merge into cumulative library if requested
+    # Strategy: save individual files to components/ dir, rebuild cumulative via merge()
+    # Never use AltiumSchLib(filepath=...) to read back — it corrupts binary OLE files!
     if args.sch and args.merge_schlib:
         try:
             merge_path = Path(args.merge_schlib)
-            if merge_path.exists():
-                merged = AltiumSchLib.merge(
-                    input_paths=[str(merge_path), out_path],
-                    output_path=str(merge_path),
-                    handle_conflicts="rename",
-                    verbose=False,
-                )
-                # merge() saves as JSON — re-save as binary OLE
-                merged.save(merge_path)
+            # Save individual component to components dir
+            comp_dir = merge_path.parent / "components_sch"
+            comp_dir.mkdir(parents=True, exist_ok=True)
+            comp_file = comp_dir / (args.title + ".SchLib")
+            shutil.copy2(out_path, comp_file)  # overwrites old version if exists
+
+            # Rebuild cumulative from all individual files
+            if comp_dir.exists():
+                sch_files = list(comp_dir.glob("*.SchLib"))
+                if sch_files:
+                    merged = AltiumSchLib.merge(
+                        input_paths=[str(f) for f in sch_files],
+                        output_path=str(merge_path),
+                        handle_conflicts="rename",
+                        verbose=False,
+                    )
+                    merged.save(merge_path)  # re-save as binary OLE
             else:
                 shutil.copy2(out_path, merge_path)
             print(f"  [Merge] SchLib → {merge_path}", file=sys.stderr)
@@ -497,17 +541,28 @@ def main():
     if args.pcb and args.merge_pcblib:
         try:
             merge_path = Path(args.merge_pcblib)
-            if merge_path.exists():
-                existing = AltiumPcbLib.from_file(merge_path)
-                new = AltiumPcbLib.from_file(out_path)
-                # Copy footprints from new to existing
-                for fp in new.footprints:
-                    existing.footprints.append(fp)
-                # Copy 3D models
-                for k, v in new.models_3d.items():
-                    if k not in existing.models_3d:
-                        existing.models_3d[k] = v
-                existing.save(merge_path)
+            # Save individual footprint to components dir
+            comp_dir = merge_path.parent / "components_pcb"
+            comp_dir.mkdir(parents=True, exist_ok=True)
+            comp_file = comp_dir / (args.title + ".PcbLib")
+            shutil.copy2(out_path, comp_file)  # overwrites old version if exists
+
+            # Rebuild cumulative from all individual files
+            if comp_dir.exists():
+                pcb_files = list(comp_dir.glob("*.PcbLib"))
+                cumulative = AltiumPcbLib()
+                first = True
+                for pf in pcb_files:
+                    try:
+                        part = AltiumPcbLib.from_file(pf)
+                        for fp in part.footprints:
+                            cumulative.footprints.append(fp)
+                        for k, v in part.models_3d.items():
+                            if k not in cumulative.models_3d:
+                                cumulative.models_3d[k] = v
+                    except Exception:
+                        continue
+                cumulative.save(merge_path)
             else:
                 shutil.copy2(out_path, merge_path)
             print(f"  [Merge] PcbLib → {merge_path}", file=sys.stderr)

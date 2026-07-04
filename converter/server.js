@@ -658,6 +658,7 @@ app.get("/ad-place/:id", async (req, res) => {
         const { stdout } = await execFileAsync(PYTHON311, [
           CONVERTER_SCRIPT, "--sch", schDocPath,
           "-o", schLibPath, "--title", title,
+          "--lcsc", id, "--pkg", pkg,
           "--merge-schlib", cumulativeSchLib
         ], { timeout: 30000 });
         binSchLibPath = (stdout || "").trim();
