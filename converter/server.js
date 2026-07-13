@@ -118,7 +118,7 @@ const HAS_BINARY_CONVERTER = PYTHON311 && fs.existsSync(CONVERTER_SCRIPT) && ALT
 console.log(`[Init] Binary converter: ${HAS_BINARY_CONVERTER ? CONVERTER_SCRIPT : "NOT AVAILABLE"}`);
 
 // AD 集成临时输出目录
-const AD_TEMP_DIR = path.join(os.tmpdir(), "LCSC-AD-Transfer");
+const AD_TEMP_DIR = "E:\\Ananan\\AD Library\\LCSC-AD-Transfer-Library";
 if (!fs.existsSync(AD_TEMP_DIR)) {
   fs.mkdirSync(AD_TEMP_DIR, { recursive: true });
 }
