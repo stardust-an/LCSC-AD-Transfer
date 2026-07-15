@@ -104,12 +104,80 @@ def sch_ascii_to_schlib(ascii_content, title="Component", params=None):
         symbol.add_parameter(name=pname, text=str(ptext), x=0, y=y_pos, is_hidden=True)
         y_pos += 50  # stack parameters vertically
 
+    # Parse all records first, then process body shapes (8,10,13) before
+    # pins (2) so filled bodies are drawn behind pin text (Z-order).
+    parsed = []
     for line in lines:
         l = line.strip()
         if not l or l.startswith("WARNING"):
             continue
-        rec = parse_record(l)
+        parsed.append(parse_record(l))
+
+    # --- Pass 1: body shapes (drawn behind everything else) ---
+    for rec in parsed:
         rt = int(rec.get("RECORD", "0"))
+        if rt not in (8, 10, 13):
+            continue
+        if rt == 8:
+            # Ellipse
+            try:
+                cx = int(float(rec.get("LOCATION.X", "0"))) * 10
+                cy = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                rx = int(float(rec.get("RADIUS", "0"))) * 10
+                ry = int(float(rec.get("SECONDARYRADIUS", f"{rx // 10}"))) * 10
+                color = int(rec.get("COLOR", "0"))
+                area = int(rec.get("AREACOLOR", str(color)))
+                is_solid = rec.get("ISSOLID", "F") == "T"
+                symbol.add_ellipse(cx, cy, rx, ry,
+                    color=color,
+                    area_color=area if is_solid else 16777215,
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
+                    is_solid=is_solid)
+            except Exception as e:
+                print(f"  [WARN] Ellipse: {e}", file=sys.stderr)
+        elif rt == 10:
+            # Rounded Rectangle (body)
+            try:
+                x1 = int(float(rec.get("LOCATION.X", "0"))) * 10
+                y1 = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                x2 = int(float(rec.get("CORNER.X", "0"))) * 10
+                y2 = int(float(rec.get("CORNER.Y", "0"))) * 10
+                crx = int(float(rec.get("CORNERXRADIUS", "0"))) * 10
+                cry = int(float(rec.get("CORNERYRADIUS", "0"))) * 10
+                color = int(rec.get("COLOR", "0"))
+                symbol.add_rounded_rectangle(x1, y1, x2, y2,
+                    corner_x_radius=crx, corner_y_radius=cry,
+                    color=color,
+                    area_color=0xB0FFFF,
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
+                    is_solid=True)
+            except Exception as e:
+                print(f"  [WARN] RoundedRect: {e}", file=sys.stderr)
+        elif rt == 13:
+            # Rectangle
+            try:
+                x1 = int(float(rec.get("LOCATION.X", "0"))) * 10
+                y1 = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                x2 = int(float(rec.get("CORNER.X", "0"))) * 10
+                y2 = int(float(rec.get("CORNER.Y", "0"))) * 10
+                color = int(rec.get("COLOR", "0"))
+                is_solid = rec.get("ISSOLID", "F") == "T"
+                area = int(rec.get("AREACOLOR", str(color if is_solid else 16777215)))
+                symbol.add_rectangle(x1, y1, x2, y2,
+                    color=color,
+                    area_color=area if is_solid else 16777215,
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
+                    is_solid=is_solid)
+            except Exception as e:
+                print(f"  [WARN] Rectangle: {e}", file=sys.stderr)
+
+    # --- Pass 2: all other objects (pins, lines, arcs, text, etc.) ---
+    for rec in parsed:
+        rt = int(rec.get("RECORD", "0"))
+
+        # Skip body shapes (already done in pass 1)
+        if rt in (8, 10, 13):
+            continue
 
         # -- Pin --
         if rt == 2:
@@ -216,50 +284,83 @@ def sch_ascii_to_schlib(ascii_content, title="Component", params=None):
             except Exception as e:
                 print(f"  [WARN] Arc/Polyline(6): {e}", file=sys.stderr)
 
-        # -- Ellipse --
-        elif rt == 8:
+        # -- Elliptical Arc (e.g. inductor coil) --
+        elif rt == 7:
             try:
                 cx = int(float(rec.get("LOCATION.X", "0"))) * 10
                 cy = int(float(rec.get("LOCATION.Y", "0"))) * 10
-                rx = int(float(rec.get("RADIUS", "0"))) * 10
-                ry = int(float(rec.get("SECONDARYRADIUS", f"{rx // 10}"))) * 10
-                color = int(rec.get("COLOR", "0"))
-                area = int(rec.get("AREACOLOR", str(color)))
-                is_solid = rec.get("ISSOLID", "F") == "T"
-                symbol.add_ellipse(cx, cy, rx, ry,
-                    color=color,
-                    area_color=area if is_solid else 16777215,
-                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
-                    is_solid=is_solid)
+                radius = int(float(rec.get("RADIUS", "0"))) * 10
+                sr = int(float(rec.get("SECONDARYRADIUS", str(radius // 10)))) * 10
+                symbol.add_elliptical_arc(cx, cy, radius, sr,
+                    start_angle=float(rec.get("STARTANGLE", "0")),
+                    end_angle=float(rec.get("ENDANGLE", "360")),
+                    color=int(rec.get("COLOR", "0")),
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")))
             except Exception as e:
-                print(f"  [WARN] Ellipse: {e}", file=sys.stderr)
+                print(f"  [WARN] EllipticalArc: {e}", file=sys.stderr)
 
-        # -- Rounded Rectangle (body) --
-        elif rt == 10:
+        # -- Pie Chart (filled arc, e.g. capacitor curved plate) --
+        elif rt == 9:
             try:
-                x1 = int(float(rec.get("LOCATION.X", "0"))) * 10
-                y1 = int(float(rec.get("LOCATION.Y", "0"))) * 10
-                x2 = int(float(rec.get("CORNER.X", "0"))) * 10
-                y2 = int(float(rec.get("CORNER.Y", "0"))) * 10
-                crx = int(float(rec.get("CORNERXRADIUS", "0"))) * 10
-                cry = int(float(rec.get("CORNERYRADIUS", "0"))) * 10
-                color = int(rec.get("COLOR", "0"))
-                # Fill body with light yellow (#FFFFB0 = 0xB0FFFF in Altium BGR),
-                # drawn behind pins because RECORD=10 appears before RECORD=2 in ASCII
-                symbol.add_rounded_rectangle(x1, y1, x2, y2,
-                    corner_x_radius=crx, corner_y_radius=cry,
-                    color=color,
-                    area_color=0xB0FFFF,
-                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
-                    is_solid=True)
+                cx = int(float(rec.get("LOCATION.X", "0"))) * 10
+                cy = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                radius = int(float(rec.get("RADIUS", "0"))) * 10
+                symbol.add_arc(cx, cy, radius,
+                    start_angle=float(rec.get("STARTANGLE", "0")),
+                    end_angle=float(rec.get("ENDANGLE", "360")),
+                    color=int(rec.get("COLOR", "0")),
+                    line_width=get_line_width(rec.get("LINEWIDTH", "1")))
             except Exception as e:
-                print(f"  [WARN] RoundedRect: {e}", file=sys.stderr)
+                print(f"  [WARN] PieChart: {e}", file=sys.stderr)
 
-        # -- Text String --
+        # -- Bezier (e.g. inductor coil wave) --
+        elif rt == 12:
+            try:
+                n = int(rec.get("LOCATIONCOUNT", "4"))
+                pts = [(int(float(rec.get(f"X{i}", "0"))) * 10,
+                        int(float(rec.get(f"Y{i}", "0"))) * 10)
+                       for i in range(1, n + 1)]
+                if len(pts) >= 4:
+                    symbol.add_bezier(pts,
+                        color=int(rec.get("COLOR", "0")),
+                        line_width=get_line_width(rec.get("LINEWIDTH", "1")))
+            except Exception as e:
+                print(f"  [WARN] Bezier: {e}", file=sys.stderr)
+
+        # -- Ellipse (body) -- handled in pass 1, skip here
+        elif rt == 8:
+            pass
+
+        # -- Rounded Rectangle (body) -- handled in pass 1, skip here
+        elif rt == 10:
+            pass
+
+        # -- Text String or Arc (RECORD=11 used for BOTH by easyeda2altium) --
         elif rt == 11:
             try:
-                text = rec.get("TEXT", "")
-                if text:
+                # Detect: STARTANGLE/RADIUS → Arc/EllipticalArc; TEXT → Text String
+                if rec.get("STARTANGLE"):
+                    # Arc / Elliptical Arc (e.g. inductor coil, capacitor plate)
+                    cx = int(float(rec.get("LOCATION.X", "0"))) * 10
+                    cy = int(float(rec.get("LOCATION.Y", "0"))) * 10
+                    radius = int(float(rec.get("RADIUS", "4"))) * 10
+                    sr_val = rec.get("SECONDARYRADIUS", str(radius // 10))
+                    sr = int(float(sr_val)) * 10
+                    if radius == sr:
+                        symbol.add_arc(cx, cy, radius,
+                            start_angle=float(rec.get("STARTANGLE", "0")),
+                            end_angle=float(rec.get("ENDANGLE", "360")),
+                            color=int(rec.get("COLOR", "0")),
+                            line_width=get_line_width(rec.get("LINEWIDTH", "1")))
+                    else:
+                        symbol.add_elliptical_arc(cx, cy, radius, sr,
+                            start_angle=float(rec.get("STARTANGLE", "0")),
+                            end_angle=float(rec.get("ENDANGLE", "360")),
+                            color=int(rec.get("COLOR", "0")),
+                            line_width=get_line_width(rec.get("LINEWIDTH", "1")))
+                elif rec.get("TEXT"):
+                    # Actual text string
+                    text = rec.get("TEXT", "")
                     x = int(float(rec.get("LOCATION.X", "0"))) * 10
                     y = int(float(rec.get("LOCATION.Y", "0"))) * 10
                     note = am.make_sch_note(
@@ -269,25 +370,11 @@ def sch_ascii_to_schlib(ascii_content, title="Component", params=None):
                     )
                     symbol.add_object(note)
             except Exception as e:
-                print(f"  [WARN] Text: {e}", file=sys.stderr)
+                print(f"  [WARN] Text/Arc(11): {e}", file=sys.stderr)
 
-        # -- Rectangle --
+        # -- Rectangle (body) -- handled in pass 1, skip here
         elif rt == 13:
-            try:
-                x1 = int(float(rec.get("LOCATION.X", "0"))) * 10
-                y1 = int(float(rec.get("LOCATION.Y", "0"))) * 10
-                x2 = int(float(rec.get("CORNER.X", "0"))) * 10
-                y2 = int(float(rec.get("CORNER.Y", "0"))) * 10
-                color = int(rec.get("COLOR", "0"))
-                is_solid = rec.get("ISSOLID", "F") == "T"
-                area = int(rec.get("AREACOLOR", str(color if is_solid else 16777215)))
-                symbol.add_rectangle(x1, y1, x2, y2,
-                    color=color,
-                    area_color=area if is_solid else 16777215,
-                    line_width=get_line_width(rec.get("LINEWIDTH", "1")),
-                    is_solid=is_solid)
-            except Exception as e:
-                print(f"  [WARN] Rectangle: {e}", file=sys.stderr)
+            pass
 
         # -- Skip: Designator(34), Comment(41), Parameter(44) --
         elif rt in (34, 41, 44):
@@ -347,9 +434,20 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
     pcblib = AltiumPcbLib()
     footprint = pcblib.add_footprint(title, description=title, height="0mil")
 
+    # --- Pass 0: find component origin first (may appear after pads) ---
     comp_x = 0.0
     comp_y = 0.0
+    for line in lines:
+        l = line.strip()
+        if not l or l.startswith("WARNING"):
+            continue
+        rec = parse_record(l)
+        if rec.get("RECORD", "") == "Component":
+            comp_x = parse_mil(rec.get("X", "0"))
+            comp_y = parse_mil(rec.get("Y", "0"))
+            break
 
+    # --- Pass 1: process all objects with correct origin ---
     for line in lines:
         l = line.strip()
         if not l or l.startswith("WARNING"):
@@ -361,8 +459,7 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
             continue
 
         elif rt == "Component":
-            comp_x = parse_mil(rec.get("X", "0"))
-            comp_y = parse_mil(rec.get("Y", "0"))
+            pass  # already handled in pass 0
 
         elif rt == "Pad":
             try:

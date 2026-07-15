@@ -103,3 +103,33 @@ server.js 中 3D 模型下载移到二进制转换之前，PCB 转换时传 `--s
 - `Package` = 实际封装名
 
 使用 `symbol.add_parameter(name, text, x, y, is_hidden=True)` 实现，默认 NC，后续可接入数据源填充。
+
+## RECORD=11 双义解析 (2026-07-15)
+
+easyeda2altium 把**圆弧**也写入了 RECORD=11（原本是 Text String）。检测字段区分：
+- 有 `STARTANGLE` + `RADIUS` → Arc/椭圆弧（电感线圈波浪、电解电容弧形极板）
+- 有 `TEXT` → 文本字符串
+
+之前当纯文字处理，`TEXT=""` 直接跳过，电感/电解电容形状全部丢失。
+
+## Body 填充 Z-order (2026-07-15)
+
+填充后 body 偶尔覆盖引脚文字。改为两遍扫描：
+- **Pass 1**: 先添加 body 图形（RECORD=8/10/13），确保在 OLE 流中排前面
+- **Pass 2**: 再添加引脚、线条、文字等其余对象
+- Body 在底层渲染，引脚文字在上层不受遮挡
+
+## PcbLib 原点修正 (2026-07-15)
+
+Component 记录可能在 Pad 之后出现，导致前面的 Pad 用了 `comp_x=0`（绝对坐标）而非相对原点。
+**Pass 0** 先扫描找到真实的 Component 原点 → 再统一减去原点偏移。
+
+## 新增 Record 类型处理 (2026-07-15)
+
+- RECORD=7: 椭圆弧 → `add_elliptical_arc()`
+- RECORD=9: 饼图/填充弧 → `add_arc()`
+- RECORD=12: 贝塞尔曲线 → `add_bezier()`
+
+## 输出路径迁移 (2026-07-15)
+
+从系统临时目录 `%TEMP%\LCSC-AD-Transfer` 迁移到 `E:\Ananan\AD Library\LCSC-AD-Transfer-Library`，避免系统清理导致文件丢失。
