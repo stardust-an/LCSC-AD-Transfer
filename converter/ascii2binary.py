@@ -434,20 +434,28 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
     pcblib = AltiumPcbLib()
     footprint = pcblib.add_footprint(title, description=title, height="0mil")
 
-    # --- Pass 0: find component origin first (may appear after pads) ---
-    comp_x = 0.0
-    comp_y = 0.0
+    # --- Pass 0: compute pad bounding-box center as origin ---
+    # Component record X/Y is the placement position on some arbitrary PCB,
+    # NOT the footprint center. Use pad centroid instead.
+    pad_xs = []
+    pad_ys = []
     for line in lines:
         l = line.strip()
         if not l or l.startswith("WARNING"):
             continue
-        rec = parse_record(l)
-        if rec.get("RECORD", "") == "Component":
-            comp_x = parse_mil(rec.get("X", "0"))
-            comp_y = parse_mil(rec.get("Y", "0"))
-            break
+        if l.startswith("|RECORD=Pad|"):
+            rec = parse_record(l)
+            pad_xs.append(parse_mil(rec.get("X", "0")))
+            pad_ys.append(parse_mil(rec.get("Y", "0")))
 
-    # --- Pass 1: process all objects with correct origin ---
+    if pad_xs:
+        origin_x = (min(pad_xs) + max(pad_xs)) / 2.0
+        origin_y = (min(pad_ys) + max(pad_ys)) / 2.0
+    else:
+        origin_x = 0.0
+        origin_y = 0.0
+
+    # --- Pass 1: process all objects relative to pad center ---
     for line in lines:
         l = line.strip()
         if not l or l.startswith("WARNING"):
@@ -458,13 +466,10 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
         if rt == "Board":
             continue
 
-        elif rt == "Component":
-            pass  # already handled in pass 0
-
         elif rt == "Pad":
             try:
-                px = parse_mil(rec.get("X", "0")) - comp_x
-                py = parse_mil(rec.get("Y", "0")) - comp_y
+                px = parse_mil(rec.get("X", "0")) - origin_x
+                py = parse_mil(rec.get("Y", "0")) - origin_y
                 footprint.add_pad(
                     designator=rec.get("NAME", ""),
                     position_mils=(px, py),
@@ -485,10 +490,10 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
                 if "MECHANICAL" in layer_str.upper() or "KEEPOUT" in layer_str.upper():
                     continue
                 footprint.add_track(
-                    start_mils=(parse_mil(rec.get("X1", "0")) - comp_x,
-                                parse_mil(rec.get("Y1", "0")) - comp_y),
-                    end_mils=(parse_mil(rec.get("X2", "0")) - comp_x,
-                              parse_mil(rec.get("Y2", "0")) - comp_y),
+                    start_mils=(parse_mil(rec.get("X1", "0")) - origin_x,
+                                parse_mil(rec.get("Y1", "0")) - origin_y),
+                    end_mils=(parse_mil(rec.get("X2", "0")) - origin_x,
+                              parse_mil(rec.get("Y2", "0")) - origin_y),
                     width_mils=parse_mil(rec.get("WIDTH", "5")),
                     layer=map_layer(layer_str),
                 )
@@ -501,8 +506,8 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
                 if "MECHANICAL" in layer_str.upper() or "KEEPOUT" in layer_str.upper():
                     continue
                 footprint.add_arc(
-                    center_mils=(parse_mil(rec.get("LOCATION.X", "0")) - comp_x,
-                                 parse_mil(rec.get("LOCATION.Y", "0")) - comp_y),
+                    center_mils=(parse_mil(rec.get("LOCATION.X", "0")) - origin_x,
+                                 parse_mil(rec.get("LOCATION.Y", "0")) - origin_y),
                     radius_mils=parse_mil(rec.get("RADIUS", "0")),
                     start_angle_degrees=float(rec.get("STARTANGLE", "0")),
                     end_angle_degrees=float(rec.get("ENDANGLE", "360")),
@@ -527,8 +532,8 @@ def pcb_ascii_to_pcblib(ascii_content, title="Footprint", step_path=None):
                     text = rec.get("STRING", "") or rec.get("TEXT", "")
                 footprint.add_text(
                     text=text,
-                    position_mils=(parse_mil(rec.get("X", "0")) - comp_x,
-                                   parse_mil(rec.get("Y", "0")) - comp_y),
+                    position_mils=(parse_mil(rec.get("X", "0")) - origin_x,
+                                   parse_mil(rec.get("Y", "0")) - origin_y),
                     height_mils=parse_mil(rec.get("HEIGHT", "10")),
                     stroke_width_mils=parse_mil(rec.get("WIDTH", "1")),
                     rotation_degrees=float(rec.get("ROTATION", "0")),
