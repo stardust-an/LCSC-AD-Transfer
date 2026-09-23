@@ -186,7 +186,9 @@ app.get("/convert/lcsc/:id", async (req, res) => {
 
   try {
     // Step 1: 从 EasyEDA API 获取元件数据
-    const url = `https://easyeda.com/api/products/${id}/components?version=6.4.19.5`;
+    //https://pro.easyeda.com/api/eda/product/search?keyword=C136354&type=3&page=1&pageSize=10
+    //有时间可以研究一下上面这个API
+    const url = `https://easyeda.com/api/products/${id}/components?version=6.5.44`;
     console.log(`[LCSC] Fetching: ${url}`);
 
     const response = await fetch(url, {
